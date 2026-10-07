@@ -9,26 +9,26 @@ import {
   unlink,
   writeFile,
   rename,
+  rm,
 } from "node:fs/promises";
 // oxlint-disable-next-line import/no-nodejs-modules -- This CLI requires native filesystem and process APIs.
 import path from "node:path";
 
 import { stat } from "./filesystem.ts";
-import { SOURCES } from "./native-sources.ts";
+import { SOURCES, sourceCache } from "./native-sources.ts";
 import type { NativeSource } from "./native-sources.ts";
 import { contained } from "./paths.ts";
 import type { Environment } from "./platform.ts";
+import { validateLayout, validateRefresh } from "./refresh.ts";
 import { sequence } from "./sequence.ts";
 import { fingerprint, git, gitWorkspace } from "./staging.ts";
 import { object } from "./values.ts";
 
+const CACHE_ENTRIES = ["checkout", "git-metadata", "gitconfig", "empty-hooks", "source.json"];
 interface Skill {
   readonly name: string;
   readonly directory: string;
   readonly previous: string;
-}
-function sourceCache(config: string, source: NativeSource): string {
-  return path.join(config, "setup-native-sources", source.name);
 }
 async function directory(file: string) {
   const info = await lstat(file);
@@ -54,6 +54,7 @@ async function validateSkills(checkout: string, source: NativeSource) {
 }
 async function validateSnapshot(config: string, source: NativeSource) {
   const cache = sourceCache(config, source);
+  await validateLayout(cache, CACHE_ENTRIES);
   const checkout = path.join(cache, "checkout");
   await directory(cache);
   await directory(checkout);
@@ -82,6 +83,7 @@ async function skillsFrom(config: string, previousRoot: string): Promise<Skill[]
     await directory(parent);
   }
   await sequence(SOURCES, async (source) => {
+    await validateRefresh(sourceCache(config, source));
     if (await stat(sourceCache(config, source))) {
       await validateSnapshot(config, source);
     }
@@ -173,7 +175,6 @@ async function publishSource(
   source: NativeSource,
   revision: string,
   links: { path: string; target: string }[],
-  cache: string,
 ) {
   await writeFile(
     path.join(scratch, "source.json"),
@@ -190,56 +191,64 @@ async function publishSource(
     ),
     { flag: "wx", mode: 0o600 },
   );
-  if (await stat(cache)) {
-    throw new Error(`Native snapshot appeared concurrently: ${cache}`);
-  }
-  await rename(scratch, cache);
-  console.log(`Native snapshot ${source.repository}, revision ${revision}`);
 }
-async function downloadSource(config: string, source: NativeSource, env: Environment) {
+async function acquireNative(config: string, source: NativeSource, env: Environment) {
   const cache = sourceCache(config, source);
   const { scratch, globalConfig, hooks } = await gitWorkspace(
     path.dirname(cache),
     `.${source.name}-download-`,
   );
   const checkout = path.join(scratch, "checkout");
-  await git(
-    [
-      "-c",
-      `core.hooksPath=${hooks}`,
-      "clone",
-      "--template=",
-      "--depth",
-      "1",
-      "--no-checkout",
-      "--",
-      `https://github.com/${source.repository}.git`,
-      checkout,
-    ],
-    globalConfig,
-    env,
-  );
-  const revision = await git(["-C", checkout, "rev-parse", "HEAD"], globalConfig, env);
-  // Git writes link text as regular files, so Windows needs no symlink privilege and extraction cannot follow upstream links.
-  await git(
-    [
-      "-C",
-      checkout,
-      "-c",
-      "core.symlinks=false",
-      "-c",
-      `core.hooksPath=${hooks}`,
-      "checkout",
-      "--force",
-      "HEAD",
-    ],
-    globalConfig,
-    env,
-  );
-  const links = await materialiseLinks(checkout, globalConfig, env);
-  await rename(path.join(checkout, ".git"), path.join(scratch, "git-metadata"));
-  await validateSkills(checkout, source);
-  await publishSource(scratch, checkout, source, revision, links, cache);
+  try {
+    await git(
+      [
+        "-c",
+        `core.hooksPath=${hooks}`,
+        "clone",
+        "--template=",
+        "--depth",
+        "1",
+        "--no-checkout",
+        "--",
+        `https://github.com/${source.repository}.git`,
+        checkout,
+      ],
+      globalConfig,
+      env,
+    );
+    const revision = await git(["-C", checkout, "rev-parse", "HEAD"], globalConfig, env);
+    // Git writes link text as regular files, so Windows needs no symlink privilege and extraction cannot follow upstream links.
+    await git(
+      [
+        "-C",
+        checkout,
+        "-c",
+        "core.symlinks=false",
+        "-c",
+        `core.hooksPath=${hooks}`,
+        "checkout",
+        "--force",
+        "HEAD",
+      ],
+      globalConfig,
+      env,
+    );
+    const links = await materialiseLinks(checkout, globalConfig, env);
+    await rename(path.join(checkout, ".git"), path.join(scratch, "git-metadata"));
+    await validateSkills(checkout, source);
+    await publishSource(scratch, checkout, source, revision, links);
+    return { cache, scratch };
+  } catch (error) {
+    await rm(scratch, { recursive: true });
+    throw error;
+  }
+}
+async function downloadSource(config: string, source: NativeSource, env: Environment) {
+  const { cache, scratch } = await acquireNative(config, source, env);
+  if (await stat(cache)) {
+    throw new Error(`Native snapshot appeared concurrently: ${cache}`);
+  }
+  await rename(scratch, cache);
 }
 async function prepareSources(config: string, env: Environment, dryRun: boolean) {
   await sequence(SOURCES, async (source) => {
@@ -289,4 +298,4 @@ async function createView(view: string, skills: Skill[]) {
     await symlink(skill.directory, link, process.platform === "win32" ? "junction" : "dir");
   });
 }
-export { skillsFrom, validateView, createView, prepareSources };
+export { acquireNative, validateSnapshot, skillsFrom, validateView, createView, prepareSources };

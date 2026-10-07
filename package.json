@@ -10,7 +10,8 @@
     "fmt:check": "node node_modules/oxfmt/bin/oxfmt -c oxfmt.config.ts --check",
     "lint": "node node_modules/oxlint/bin/oxlint -c oxlint.config.ts --deny-warnings --type-aware --type-check src tests *.config.ts",
     "setup": "bun src/cli.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "update": "bun src/cli.ts --update"
   },
   "dependencies": {
     "jsonc-parser": "3.3.1",

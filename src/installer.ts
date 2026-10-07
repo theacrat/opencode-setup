@@ -5,29 +5,35 @@ import { adapterSource, manager } from "./adapter.ts";
 import { configPath } from "./config-path.ts";
 import { documents, planConfiguration, writeConfiguration } from "./configuration.ts";
 import { stat } from "./filesystem.ts";
-import { pendingVendors, validatePending } from "./inventory.ts";
+import { pendingVendors, validateAllStages } from "./inventory.ts";
 import { skillsFrom, validateView, createView, prepareSources } from "./native-skills.ts";
 import type { Environment } from "./platform.ts";
 import { sequence } from "./sequence.ts";
 import { stagedSource, stageVendor } from "./staging.ts";
+import { pullSources, reportUpdates, validateUpdateLock, withUpdateLock } from "./update.ts";
 
 const HELP = `Install OpenCode V2 vendor plugins and self-contained native skills.
 
-Usage: bun run setup [--dry-run] [--adapter PATH] [--config-dir PATH]
+Usage: bun run setup [--update] [--dry-run] [--adapter PATH] [--config-dir PATH]
 
 Defaults: installed oc-agent-plugins@0.2.2 and fixed upstream native sources.
 --adapter PATH selects an optional built local adapter instead of npm.
 Config: OPENCODE_CONFIG_DIR, XDG_CONFIG_HOME/opencode, ~/.config/opencode.
 --dry-run validates and reports without writes or network retrieval.
 Existing healthy owned vendor snapshots are skipped, including disabled packages.
-Use the adapter's update command explicitly to refresh snapshots.
+--update (bun run update) pulls fresh native and vendor sources; the adapter pin and bundled thea-mode are unchanged.
 --help, -h show this help.`;
 
 function argumentsFrom(argv: string[]) {
   const options = new Map<string, string>();
   let dryRun = false;
+  let update = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
+    if (arg === "--update") {
+      update = true;
+      continue;
+    }
     if (arg === "--dry-run") {
       dryRun = true;
       continue;
@@ -41,7 +47,7 @@ function argumentsFrom(argv: string[]) {
     }
     options.set(arg, value);
   }
-  return { dryRun, options };
+  return { dryRun, options, update };
 }
 async function locations(options: Map<string, string>, env: Environment) {
   const parent = path.resolve(import.meta.dirname, "../..");
@@ -80,14 +86,67 @@ function reportPlan(
   }
   return false;
 }
-export async function run(argv: string[], env: Environment): Promise<void> {
+async function applySetup({
+  adapter,
+  config,
+  env,
+  pending,
+  skills,
+  target,
+  update,
+  updated,
+  view,
+}: {
+  adapter: Awaited<ReturnType<typeof adapterSource>>;
+  config: string;
+  env: Environment;
+  pending: Awaited<ReturnType<typeof pendingVendors>>;
+  skills: Awaited<ReturnType<typeof skillsFrom>>;
+  target: Awaited<ReturnType<typeof planConfiguration>>["target"];
+  update: boolean;
+  updated: Awaited<ReturnType<typeof planConfiguration>>["updated"];
+  view: string;
+}) {
+  const { cli } = adapter;
+  try {
+    if (update) {
+      await pullSources(
+        cli,
+        config,
+        env,
+        pending.map((vendor) => vendor.name),
+      );
+    } else {
+      await prepareSources(config, env, false);
+      await sequence(pending, async (vendor) => {
+        const source = vendor.staged ? await stageVendor(config, vendor.name, env) : vendor.source;
+        await manager(cli, config, ["install", source], env);
+        console.log(`Installed ${vendor.name}`);
+      });
+    }
+    await createView(view, skills);
+    await writeConfiguration(target, updated);
+  } catch (error) {
+    throw new Error(
+      `Partial setup; earlier successful updates or installs are retained. Resolve the error before retrying. ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+}
+function validateUnchanged(before: unknown, after: unknown, label: string) {
+  if (JSON.stringify(before) !== JSON.stringify(after)) {
+    throw new Error(`${label} changed during setup preflight; retry explicitly.`);
+  }
+}
+async function run(argv: string[], env: Environment): Promise<void> {
   if (argv.includes("--help") || argv.includes("-h")) {
     console.log(HELP);
     return;
   }
-  const { options, dryRun } = argumentsFrom(argv);
+  const { options, dryRun, update } = argumentsFrom(argv);
   const { parent, override, adapter, config } = await locations(options, env);
   const { cli } = adapter;
+  await validateUpdateLock(config);
   const configInfo = await stat(config);
   if (configInfo && (!configInfo.isDirectory() || configInfo.isSymbolicLink())) {
     throw new Error(`Config target must be a regular directory: ${config}`);
@@ -107,25 +166,24 @@ export async function run(argv: string[], env: Environment): Promise<void> {
   const adapterEntry = adapter.reference;
   const pending = await pendingVendors(cli, config, env);
   console.log(`${dryRun ? "Dry run" : "Target"}: ${config}`);
-  await validatePending(config, pending);
+  await validateAllStages(config);
+  if (update && dryRun) {
+    reportUpdates();
+  }
   if (reportPlan(config, dryRun, skills, pending, adapterEntry, view, target.file)) {
     await prepareSources(config, env, true);
     return;
   }
-  try {
-    await prepareSources(config, env, false);
-    await sequence(pending, async (vendor) => {
-      const source = vendor.staged ? await stageVendor(config, vendor.name, env) : vendor.source;
-      await manager(cli, config, ["install", source], env);
-      console.log(`Installed ${vendor.name}`);
-    });
-    await createView(view, skills);
-    await writeConfiguration(target, updated);
-  } catch (error) {
-    throw new Error(
-      `Partial setup; earlier installed snapshots or native links are retained. Rerun after resolving the error. ${error instanceof Error ? error.message : String(error)}`,
-      { cause: error },
-    );
-  }
+  await withUpdateLock(config, async () => {
+    await skillsFrom(config, path.join(parent, "ai-config"));
+    await validateView(view, skills);
+    await validateAllStages(config);
+    const freshPending = await pendingVendors(cli, config, env);
+    validateUnchanged(pending, freshPending, "Vendor inventory");
+    const freshDocs = await documents(config);
+    validateUnchanged(docs, freshDocs, "Configuration");
+    await applySetup({ adapter, config, env, pending, skills, target, update, updated, view });
+  });
   console.log(`Configured ${target.file}. No trust granted or OpenCode/MCP processes started.`);
 }
+export { run };

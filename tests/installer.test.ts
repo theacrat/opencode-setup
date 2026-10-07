@@ -262,10 +262,19 @@ const file = p.join(root, 'inventory.json');
 const entries = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
 if (args[0] === 'install') {
   if (process.env["SETUP_TEST_FAIL"] === args[1]) { console.error('fixture install failure'); process.exit(1); }
-  const vendor = ${JSON.stringify(vendors)}.find(vendor => vendor.source === args[1]) || {name:args[1].includes('mattpocock-skills') ? 'mattpocock-skills' : 'pstack'};
+   const vendor = ${JSON.stringify(vendors)}.find(vendor => vendor.source === args[1]) || {name:args[1].includes('mattpocock-skills') ? 'mattpocock-skills' : 'pstack'};
   entries.push({ name: vendor.name, enabled: true, managed: true, receipt: { source: ['pstack','mattpocock-skills'].includes(vendor.name) ? {kind:'local',path:args[1]} : { kind: 'git', url: 'https://github.com/' + args[1] + '.git' } } });
   fs.mkdirSync(root, {recursive:true});
   fs.writeFileSync(file, JSON.stringify(entries));
+  fs.appendFileSync(p.join(root, 'calls.jsonl'), JSON.stringify(args) + '\\n');
+}
+if (args[0] === 'update') {
+  if (process.env['SETUP_TEST_AMBIGUOUS'] === args[1]) {
+    entries.find(entry => entry.name === args[1]).receipt.changed = true;
+    fs.writeFileSync(file, JSON.stringify(entries));
+    console.error('fixture failure after commit'); process.exit(1);
+  }
+  if (process.env['SETUP_TEST_FAIL'] === args[1]) { console.error('fixture update failure'); process.exit(1); }
   fs.appendFileSync(p.join(root, 'calls.jsonl'), JSON.stringify(args) + '\\n');
 }
 console.log(JSON.stringify({entries}));`,
@@ -294,13 +303,257 @@ console.log(JSON.stringify({entries}));`,
       },
     );
   };
-  return { adapter, config, invoke, root };
+  return { adapter, config, invoke, replacements, root };
 }
 afterEach(async () => {
   await Promise.all(
     roots.splice(0).map(async (root) => rm(root, { force: true, recursive: true })),
   );
 });
+
+async function advance(
+  source: string,
+  file = "resources/new.md",
+  content = "Fresh upstream bytes",
+) {
+  await put(path.join(source, file), content);
+  await gitFixture(["-C", source, "add", "."]);
+  await gitFixture([
+    "-C",
+    source,
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=fixture@example.invalid",
+    "commit",
+    "-m",
+    "advance",
+  ]);
+}
+async function snapshotFiles(directory: string): Promise<Record<string, string>> {
+  const result: Record<string, string> = {};
+  await sequence(await readdir(directory, { withFileTypes: true }), async (entry) => {
+    const file = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      for (const [name, bytes] of Object.entries(await snapshotFiles(file))) {
+        result[`${entry.name}/${name}`] = bytes;
+      }
+    } else if (entry.isFile()) {
+      const bytes = await readFile(file);
+      result[entry.name] = bytes.toString("base64");
+    } else {
+      result[entry.name] = await readlink(file);
+    }
+  });
+  return result;
+}
+test("update pulls fresh native and all vendor revisions, resources and preserves disabled snapshots", async () => {
+  const { config, invoke, replacements } = await fixture({ npm: true });
+  const install = await invoke();
+  expect(install.status).toBe(0);
+  const before = await snapshotFiles(config);
+  await sequence(Object.values(replacements), async (source) => {
+    await advance(
+      source,
+      source.endsWith("pstack-upstream") ? "pstack/resources/new.md" : "resources/new.md",
+    );
+  });
+  const adapterCli = createRequire(import.meta.url).resolve("oc-agent-plugins/package.json");
+  await sequence(["cloudflare", "pstack"], async (name) => {
+    const result = await runProcess(
+      "node",
+      [path.join(path.dirname(adapterCli), "dist/cli.js"), "disable", name, "--global", "--json"],
+      { encoding: "utf8", env: { ...process.env, OPENCODE_CONFIG_DIR: config } },
+    );
+    expect(result.status).toBe(0);
+  });
+  const result = await invoke(["--update"]);
+  expect(result.stderr).toBe("");
+  expect(result.status).toBe(0);
+  const files = await snapshotFiles(config);
+  await sequence(Object.values(replacements), async (source) => {
+    const revision = await runProcess("git", ["-C", source, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    });
+    expect(
+      Object.entries(files).some(
+        ([file, bytes]) =>
+          file.endsWith(".json") &&
+          Buffer.from(bytes, "base64").toString().includes(revision.stdout.trim()),
+      ),
+    ).toBe(true);
+  });
+  await sequence(["anthropics", "vercel", "trailofbits"], async (name) => {
+    expect(
+      await readFile(
+        path.join(config, "setup-native-sources", name, "checkout/resources/new.md"),
+        "utf8",
+      ),
+    ).toBe("Fresh upstream bytes");
+    expect(files[`setup-native-sources/${name}/source.json`]).not.toBe(
+      before[`setup-native-sources/${name}/source.json`],
+    );
+  });
+  for (const vendor of vendors) {
+    const suffix = `${vendor.name}/resources/new.md`;
+    expect(
+      Object.entries(files).some(
+        ([file, bytes]) =>
+          file.includes("agent-plugins") &&
+          file.endsWith(suffix) &&
+          Buffer.from(bytes, "base64").toString() === "Fresh upstream bytes",
+      ),
+    ).toBe(true);
+  }
+  expect(files["setup-native-skills/thea-mode"]).toBe(before["setup-native-skills/thea-mode"]);
+  const rerun = await invoke();
+  expect(rerun.stdout).toContain("Skip pstack (healthy managed snapshot, disabled)");
+  expect(rerun.stdout).toContain("Skip cloudflare (healthy managed snapshot, disabled)");
+});
+test("update dry-run fetches and writes nothing and interrupted journals fail closed", async () => {
+  const { config, invoke, root } = await fixture({ npm: true });
+  const install = await invoke();
+  expect(install.status).toBe(0);
+  await put(path.join(root, "no-network"), "forbidden");
+  const before = await snapshotFiles(config);
+  const result = await invoke(["--update", "--dry-run"]);
+  expect(result.status).toBe(0);
+  expect(result.stdout).toContain("Would fetch mattpocock/skills into a fresh compatibility stage");
+  expect(await snapshotFiles(config)).toEqual(before);
+  await put(path.join(config, "setup-sources/pstack.update.json"), "retain generations");
+  const blocked = await invoke(["--update"]);
+  expect(blocked.status).toBe(1);
+  expect(blocked.stderr).toContain("Interrupted source update");
+  expect(await readFile(path.join(config, "setup-sources/pstack.update.json"), "utf8")).toBe(
+    "retain generations",
+  );
+});
+test("incompatible fresh compatibility source preserves every existing snapshot", async () => {
+  const { config, invoke, replacements } = await fixture({ npm: true });
+  const install = await invoke();
+  expect(install.status).toBe(0);
+  const before = await snapshotFiles(config);
+  const source = replacements["https://github.com/mattpocock/skills.git"];
+  if (!source) {
+    throw new Error("Missing Matt fixture");
+  }
+  await advance(source, "AGENTS.md", "unexpected instructions");
+  const result = await invoke(["--update"]);
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("AGENTS.md link changed");
+  expect(await snapshotFiles(config)).toEqual(before);
+});
+test("failed staged manager update restores old stage and keeps earlier native updates honestly", async () => {
+  const { config, invoke, replacements } = await fixture();
+  const install = await invoke();
+  expect(install.status).toBe(0);
+  const oldStage = await snapshotFiles(path.join(config, "setup-sources/pstack"));
+  const inventory = await readFile(path.join(config, "inventory.json"), "utf8");
+  await sequence(Object.values(replacements), async (source) => {
+    await advance(source);
+  });
+  const result = await invoke(["--update"], { SETUP_TEST_FAIL: "pstack" });
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("Partial setup; earlier successful updates");
+  expect(await snapshotFiles(path.join(config, "setup-sources/pstack"))).toEqual(oldStage);
+  expect(await readFile(path.join(config, "inventory.json"), "utf8")).toBe(inventory);
+  expect(
+    await readFile(
+      path.join(config, "setup-native-sources/anthropics/checkout/resources/new.md"),
+      "utf8",
+    ),
+  ).toBe("Fresh upstream bytes");
+  const rerun = await invoke();
+  expect(rerun.status).toBe(0);
+});
+test("update retrieval failure and edited installs are refused before publication", async () => {
+  const { config, invoke, root } = await fixture({ npm: true });
+  const install = await invoke();
+  expect(install.status).toBe(0);
+  const before = await snapshotFiles(config);
+  await put(path.join(root, "no-network"), "forbidden");
+  const retrieval = await invoke(["--update"]);
+  expect(retrieval.status).toBe(1);
+  expect(await snapshotFiles(config)).toEqual(before);
+  await put(
+    path.join(config, "setup-sources/pstack/checkout/pstack/skills/probe/SKILL.md"),
+    "User edits",
+  );
+  const edited = await invoke(["--update"]);
+  expect(edited.status).toBe(1);
+  expect(edited.stderr).toContain("edited or unowned pstack stage");
+  expect(
+    await readFile(
+      path.join(config, "setup-sources/pstack/checkout/pstack/skills/probe/SKILL.md"),
+      "utf8",
+    ),
+  ).toBe("User edits");
+});
+test("cache notes and an active update lock are preserved and refused before retrieval", async () => {
+  const { config, invoke, root } = await fixture({ npm: true });
+  const install = await invoke();
+  expect(install.status).toBe(0);
+  await put(path.join(root, "no-network"), "forbidden");
+  await put(path.join(config, "setup-sources/pstack/notes.txt"), "User notes");
+  const before = await snapshotFiles(config);
+  const result = await invoke(["--update"]);
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("Unexpected source cache entry");
+  expect(await snapshotFiles(config)).toEqual(before);
+  await put(path.join(config, "setup-update.lock"), "unknown process");
+  const locked = await invoke(["--update", "--dry-run"]);
+  expect(locked.status).toBe(1);
+  expect(locked.stderr).toContain("already running or interrupted");
+  expect(await readFile(path.join(config, "setup-update.lock"), "utf8")).toBe("unknown process");
+});
+test("ambiguous manager failure retains both source generations and refuses a retry", async () => {
+  const { config, invoke, replacements } = await fixture();
+  const install = await invoke();
+  expect(install.status).toBe(0);
+  const source = replacements["https://github.com/theacrat/pstack-generic.git"];
+  if (!source) {
+    throw new Error("Missing pstack fixture");
+  }
+  await advance(source, "pstack/resources/new.md");
+  const result = await invoke(["--update"], { SETUP_TEST_AMBIGUOUS: "pstack" });
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("Manager outcome changed despite failure");
+  const journalText = await readFile(path.join(config, "setup-sources/pstack.update.json"), "utf8");
+  const journal = object(JSON.parse(journalText), "update journal");
+  expect(typeof journal["backup"]).toBe("string");
+  if (typeof journal["backup"] !== "string") {
+    throw new TypeError("Missing backup path");
+  }
+  expect(
+    await readFile(
+      path.join(journal["backup"], "previous/checkout/pstack/skills/probe/SKILL.md"),
+      "utf8",
+    ),
+  ).toBe("Pstack resources");
+  expect(
+    await readFile(
+      path.join(config, "setup-sources/pstack/checkout/pstack/resources/new.md"),
+      "utf8",
+    ),
+  ).toBe("Fresh upstream bytes");
+  const retry = await invoke(["--update"]);
+  expect(retry.status).toBe(1);
+  expect(retry.stderr).toContain("Interrupted source update");
+});
+test.each(["agent-plugins", ".agent-plugins-disabled"])(
+  "update refuses a regular-file vendor target in %s before fetching",
+  async (store) => {
+    const { config, invoke, root } = await fixture({ npm: true });
+    await put(path.join(root, "no-network"), "forbidden");
+    const file = path.join(config, store, "cloudflare");
+    await put(file, "User content");
+    const before = await snapshotFiles(config);
+    const result = await invoke(["--update"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Conflicting vendor target");
+    expect(await snapshotFiles(config)).toEqual(before);
+  },
+);
 
 test("npm default invokes the published manager without downloads or dry-run writes", async () => {
   const { root, config, invoke } = await fixture({ npm: true });

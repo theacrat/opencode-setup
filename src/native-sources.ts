@@ -1,3 +1,6 @@
+// oxlint-disable-next-line import/no-nodejs-modules -- Native source paths use platform separators.
+import path from "node:path";
+
 interface NativeSource {
   readonly name: string;
   readonly repository: string;
@@ -35,5 +38,8 @@ const SOURCES: readonly NativeSource[] = [
     ],
   },
 ];
-export { SOURCES };
+function sourceCache(config: string, source: NativeSource): string {
+  return path.join(config, "setup-native-sources", source.name);
+}
+export { SOURCES, sourceCache };
 export type { NativeSource };

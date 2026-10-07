@@ -12,6 +12,7 @@ import {
   mkdtemp,
   rename,
   realpath,
+  rm,
 } from "node:fs/promises";
 // oxlint-disable-next-line import/no-nodejs-modules -- This CLI requires native filesystem and process APIs.
 import path from "node:path";
@@ -19,6 +20,7 @@ import path from "node:path";
 import { stat } from "./filesystem.ts";
 import { execute } from "./platform.ts";
 import type { Environment } from "./platform.ts";
+import { validateLayout } from "./refresh.ts";
 import { sequence } from "./sequence.ts";
 import { object } from "./values.ts";
 import { VENDORS } from "./vendors.ts";
@@ -75,6 +77,12 @@ function stagedSource(config: string, name: StagedVendor): string {
 }
 
 async function validateStage(config: string, name: StagedVendor): Promise<void> {
+  await validateLayout(path.join(config, "setup-sources", name), [
+    "checkout",
+    "gitconfig",
+    "empty-hooks",
+    "compatibility.json",
+  ]);
   const source = stagedSource(config, name);
   const vendor = stagedVendor(name);
   await sequence(
@@ -219,61 +227,76 @@ async function cloneSource(
   );
   const checkout = path.join(scratch, "checkout");
   const source = path.join(checkout, vendor.subdir);
-  await git(
-    [
-      "-c",
-      `core.hooksPath=${hooks}`,
-      "clone",
-      "--template=",
-      "--depth",
-      "1",
-      "--",
-      `https://github.com/${vendor.repository}.git`,
-      checkout,
-    ],
-    globalConfig,
-    env,
-  );
-  const revision = await git(["-C", checkout, "rev-parse", "HEAD"], globalConfig, env);
-  return { revision, scratch, source };
+  try {
+    await git(
+      [
+        "-c",
+        `core.hooksPath=${hooks}`,
+        "clone",
+        "--template=",
+        "--depth",
+        "1",
+        "--",
+        `https://github.com/${vendor.repository}.git`,
+        checkout,
+      ],
+      globalConfig,
+      env,
+    );
+    const revision = await git(["-C", checkout, "rev-parse", "HEAD"], globalConfig, env);
+    return { revision, scratch, source };
+  } catch (error) {
+    await rm(scratch, { recursive: true });
+    throw error;
+  }
+}
+async function acquireStage(config: string, name: StagedVendor, env: Environment) {
+  const cache = path.join(config, "setup-sources", name);
+  const vendor = stagedVendor(name);
+  const { scratch, source, revision } = await cloneSource(cache, vendor, name, env);
+  try {
+    const sourceInfo = await lstat(source);
+    if (!sourceInfo.isDirectory() || sourceInfo.isSymbolicLink()) {
+      throw new Error(`Unsafe staged source directory: ${source}`);
+    }
+    const adjustment = await adjustSource(source, name);
+    await writeFile(
+      path.join(scratch, "compatibility.json"),
+      JSON.stringify(
+        {
+          digestVersion: 2,
+          revision,
+          source: `https://github.com/${vendor.repository}.git`,
+          subdir: vendor.subdir,
+          ...adjustment,
+          fingerprint: await fingerprint(source),
+        },
+        undefined,
+        2,
+      ),
+      { flag: "wx", mode: 0o600 },
+    );
+    return { cache, scratch };
+  } catch (error) {
+    await rm(scratch, { recursive: true });
+    throw error;
+  }
 }
 async function stageVendor(config: string, name: StagedVendor, env: Environment): Promise<string> {
   const cache = path.join(config, "setup-sources", name);
-  const vendor = stagedVendor(name);
   if (await stat(cache)) {
     await validateStage(config, name);
     return stagedSource(config, name);
   }
-  const { scratch, source, revision } = await cloneSource(cache, vendor, name, env);
-  const sourceInfo = await lstat(source);
-  if (!sourceInfo.isDirectory() || sourceInfo.isSymbolicLink()) {
-    throw new Error(`Unsafe staged source directory: ${source}`);
-  }
-  const adjustment = await adjustSource(source, name);
-  await writeFile(
-    path.join(scratch, "compatibility.json"),
-    JSON.stringify(
-      {
-        digestVersion: 2,
-        revision,
-        source: `https://github.com/${vendor.repository}.git`,
-        subdir: vendor.subdir,
-        ...adjustment,
-        fingerprint: await fingerprint(source),
-      },
-      undefined,
-      2,
-    ),
-    { flag: "wx", mode: 0o600 },
-  );
+  const { scratch } = await acquireStage(config, name, env);
   if (await stat(cache)) {
     throw new Error(`Staging target appeared concurrently: ${cache}`);
   }
   await rename(scratch, cache);
   console.log(
-    `${name} compatibility staging at ${stagedSource(config, name)}, revision ${revision}; ${name === "pstack" ? "only invalid root plugin.json omitted" : "AGENTS.md -> CLAUDE.md materialised"}`,
+    `${name} compatibility staging at ${stagedSource(config, name)}; ${name === "pstack" ? "only invalid root plugin.json omitted" : "AGENTS.md -> CLAUDE.md materialised"}`,
   );
   return stagedSource(config, name);
 }
 
-export { fingerprint, git, gitWorkspace, stagedSource, validateStage, stageVendor };
+export { acquireStage, fingerprint, git, gitWorkspace, stagedSource, validateStage, stageVendor };
