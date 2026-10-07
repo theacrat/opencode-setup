@@ -60,6 +60,8 @@ These explicit manager commands may download the pinned package through npx. Set
 
 ## Development
 
+Development tooling requires Node >=24 to load the TypeScript configs; the installer manager still requires Node >=22.14. `bun run check` uses the complete thea-mode templates: Oxlint enforces type-aware lint, type checking and zero warnings, then Oxfmt and Vitest run. No separate tsc gate is needed. Hooks and CI also enforce conventional commit messages.
+
 ```sh
 bun install --frozen-lockfile
 bun run check
