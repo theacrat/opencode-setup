@@ -33,7 +33,7 @@ async function put(file: string, content: string) {
   await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, content);
 }
-async function fixture(npm = false, relocated = false) {
+async function fixture({ npm = false, relocated = false } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "opencode-setup test "));
   roots.push(root);
   let installer = path.resolve("src/cli.ts");
@@ -233,7 +233,7 @@ afterEach(async () => {
 });
 
 test("npm default invokes the published manager without downloads or dry-run writes", async () => {
-  const { root, config, invoke } = await fixture(true);
+  const { root, config, invoke } = await fixture({ npm: true });
   const before = await readdir(root);
   const result = invoke(["--dry-run"], {
     SETUP_TEST_NO_NETWORK: "1",
@@ -251,7 +251,7 @@ test("npm default invokes the published manager without downloads or dry-run wri
 test.each(["oc-agent-plugins", "oc-agent-plugins@0.1.0", "local", "file", "relative"])(
   "npm default migrates %s registration and preserves object options and comments",
   async (kind) => {
-    const { adapter, config, invoke } = await fixture(true);
+    const { adapter, config, invoke } = await fixture({ npm: true });
     const reference =
       kind === "local"
         ? adapter
@@ -281,7 +281,7 @@ test.each(["oc-agent-plugins", "oc-agent-plugins@0.1.0", "local", "file", "relat
 );
 
 test("npm default rejects duplicate npm/local registrations before writing", async () => {
-  const { adapter, config, invoke } = await fixture(true);
+  const { adapter, config, invoke } = await fixture({ npm: true });
   const file = path.join(config, "opencode.jsonc");
   const original = JSON.stringify({ plugins: ["oc-agent-plugins", adapter] });
   await put(file, original);
@@ -294,7 +294,7 @@ test("npm default rejects duplicate npm/local registrations before writing", asy
 test.each(["absolute", "file", "relative"])(
   "npm default migrates the missing former sibling via %s without adopting arbitrary missing paths",
   async (kind) => {
-    const { root, config, invoke } = await fixture(true, true);
+    const { root, config, invoke } = await fixture({ npm: true, relocated: true });
     const old = path.join(root, "opencode-agent-plugins");
     const reference =
       kind === "file"
@@ -322,7 +322,7 @@ test.each(["absolute", "file", "relative"])(
 );
 
 test("npm default preserves an unrelated package at the former sibling location", async () => {
-  const { root, config, invoke } = await fixture(true, true);
+  const { root, config, invoke } = await fixture({ npm: true, relocated: true });
   const unrelated = path.join(root, "opencode-agent-plugins");
   await put(path.join(unrelated, "package.json"), JSON.stringify({ name: "unrelated-plugin" }));
   const file = path.join(config, "opencode.jsonc");
@@ -337,7 +337,7 @@ test("npm default preserves an unrelated package at the former sibling location"
 });
 
 test("npm default adds the pinned string registration without adopting unrelated local plugins", async () => {
-  const { root, config, invoke } = await fixture(true);
+  const { root, config, invoke } = await fixture({ npm: true });
   const unrelated = path.join(root, "unrelated");
   await put(path.join(unrelated, "package.json"), JSON.stringify({ name: "other-plugin" }));
   const file = path.join(config, "opencode.jsonc");

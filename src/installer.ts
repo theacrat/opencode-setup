@@ -74,6 +74,27 @@ async function isLocalAdapter(candidate: string): Promise<boolean> {
     return false;
   }
 }
+
+function localPluginPath(reference: string, config: string): string | undefined {
+  if (reference.startsWith("file:")) return fileURLToPath(reference);
+  if (reference.startsWith(`~${path.sep}`) || reference.startsWith("~/"))
+    return path.join(homedir(), reference.slice(2));
+  if (path.isAbsolute(reference)) return reference;
+  if (reference.startsWith(".")) return path.resolve(config, reference);
+  return undefined;
+}
+
+async function matchesLocalAdapter(
+  candidate: string,
+  override: string | undefined,
+  directory: string,
+  parent: string,
+): Promise<boolean> {
+  const info = await stat(candidate);
+  if (override) return info !== undefined && (await realpath(candidate)) === directory;
+  if (!info) return path.resolve(candidate) === path.join(parent, "opencode-agent-plugins");
+  return isLocalAdapter(candidate);
+}
 interface Skill {
   readonly name: string;
   readonly directory: string;
@@ -282,23 +303,10 @@ export async function run(argv: string[]): Promise<void> {
     for (const [index, entry] of ((doc.value.plugins ?? []) as unknown[]).entries()) {
       const reference = typeof entry === "string" ? entry : object(entry, "plugin").package;
       if (typeof reference !== "string") continue;
-      const candidate = reference.startsWith("file:")
-        ? fileURLToPath(reference)
-        : reference.startsWith("~" + path.sep) || reference.startsWith("~/")
-          ? path.join(homedir(), reference.slice(2))
-          : path.isAbsolute(reference)
-            ? reference
-            : reference.startsWith(".")
-              ? path.resolve(config, reference)
-              : undefined;
+      const candidate = localPluginPath(reference, config);
       if (
         isNpmAdapter(reference) ||
-        (candidate &&
-          (override
-            ? (await stat(candidate)) && (await realpath(candidate)) === adapter.directory
-            : (path.resolve(candidate) === path.join(parent, "opencode-agent-plugins") &&
-                !(await stat(candidate))) ||
-              (await isLocalAdapter(candidate))))
+        (candidate && (await matchesLocalAdapter(candidate, override, adapter.directory, parent)))
       )
         registrations.push({ doc, entry, reference, index });
     }
