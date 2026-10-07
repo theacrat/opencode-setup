@@ -22,7 +22,7 @@ const HELP = `Install OpenCode V2 vendor plugins and native ai-config skills.
 
 Usage: bun run setup [--dry-run] [--adapter PATH] [--ai-config PATH] [--config-dir PATH]
 
-Defaults: installed oc-agent-plugins@0.2.1 and sibling ai-config checkout.
+Defaults: installed oc-agent-plugins@0.2.2 and sibling ai-config checkout.
 --adapter PATH selects an optional built local adapter instead of npm.
 Config: OPENCODE_CONFIG_DIR, XDG_CONFIG_HOME/opencode, ~/.config/opencode.
 --dry-run validates and reports without writes or network retrieval.
@@ -31,7 +31,7 @@ Use the adapter's update command explicitly to refresh snapshots.
 --help, -h show this help.`;
 
 type ObjectValue = Record<string, unknown>;
-const ADAPTER_VERSION = "0.2.1";
+const ADAPTER_VERSION = "0.2.2";
 const ADAPTER_SPEC = `oc-agent-plugins@${ADAPTER_VERSION}`;
 
 function isNpmAdapter(reference: string): boolean {

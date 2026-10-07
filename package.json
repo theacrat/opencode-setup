@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "jsonc-parser": "3.3.1",
-    "oc-agent-plugins": "0.2.1"
+    "oc-agent-plugins": "0.2.2"
   },
   "devDependencies": {
     "@types/bun": "1.4.2",

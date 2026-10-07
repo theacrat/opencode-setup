@@ -1,6 +1,6 @@
 # OpenCode V2 setup
 
-Install four vendor packages through the pinned npm `oc-agent-plugins@0.2.1` manager and selected loose skills from sibling `ai-config`. Requires Bun 1.4.2, Node 22.14 or newer, Git, and a populated ai-config checkout. No adapter checkout is required. No credentials, hook/monitor trust, MCP connections or OpenCode startup are performed.
+Install four vendor packages through the pinned npm `oc-agent-plugins@0.2.2` manager and selected loose skills from sibling `ai-config`. Requires Bun 1.4.2, Node 22.14 or newer, Git, and a populated ai-config checkout. No adapter checkout is required. No credentials, hook/monitor trust, MCP connections or OpenCode startup are performed.
 
 ```sh
 bun install
@@ -30,7 +30,9 @@ The Matt Pocock root includes a plugin manifest with explicit nested skill paths
 
 Two narrow upstream compatibility exceptions require immutable installer-owned staging under `<config-dir>/setup-sources`, outside vendor discovery. pstack's schema-less root `plugin.json` fails manager validation; staging omits only that file after checking its identity and valid Claude manifest. Matt Pocock's `AGENTS.md -> CLAUDE.md` link fails the manager's Git-link policy; staging materialises only that verified in-tree file link. Complete package resources are retained. Original manifests/link details, upstream Git revision and a content digest are recorded in `compatibility.json`. Neither sibling checkout nor an installed snapshot is edited. Stages are published by directory rename, and edited/unowned stages are rejected. Interrupted unpublished staging directories remain for inspection.
 
-The adapter is registered as `oc-agent-plugins@0.2.1`. Setup resolves the installed npm package's exported package.json and CLI bin, without npx or runtime adapter downloads. Existing unversioned/versioned npm registrations and local paths whose package.json identifies `oc-agent-plugins` are replaced rather than duplicated. Existing object options and comments remain intact; unrelated local plugins are untouched. `--adapter "/path/to/opencode-agent-plugins"` optionally selects a built local checkout and registers its absolute directory for development. Existing local override registrations remain unchanged. No adapter-wide format overrides are added. With default options Cloudflare uses its canonical Agent Plugins manifest, staged pstack and Matt Pocock use Claude, and 1Password uses Cursor. Existing format/component overrides can intentionally suppress vendor features and are not changed by setup.
+The adapter is registered as `oc-agent-plugins@0.2.2`. Setup resolves the installed npm package's exported package.json and CLI bin, without npx or runtime adapter downloads. Existing unversioned/versioned npm registrations and local paths whose package.json identifies `oc-agent-plugins` are replaced rather than duplicated. Existing object options and comments remain intact; unrelated local plugins are untouched. `--adapter "/path/to/opencode-agent-plugins"` optionally selects a built local checkout and registers its absolute directory for development. Existing local override registrations remain unchanged. No adapter-wide format overrides are added. With default options Cloudflare uses its canonical Agent Plugins manifest, staged pstack and Matt Pocock use Claude, and 1Password uses Cursor. Existing format/component overrides can intentionally suppress vendor features and are not changed by setup.
+
+Vendor skill IDs and displayed names both use `<plugin>:<skill>`. Native loose skills keep their unprefixed aliases.
 
 1Password's upstream runtime requires its desktop app and Labs MCP Server on macOS or Linux. It is **not supported on Windows**. Snapshot installation on Windows does not make that runtime usable.
 
@@ -45,9 +47,9 @@ Keep ai-config at its registered absolute location. Moving that checkout require
 Repeat runs skip only healthy managed snapshots whose receipt identifies the exact selected Git URL, with no explicit ref, or the exact owned local stage for pstack and Matt Pocock. Stage digests must also match. Disabled snapshots remain disabled. Edited, unmanaged, duplicate or source-conflicting packages cause an actionable failure. Missing packages are installed at the upstream default branch using manager ownership safeguards. Updates are **explicit**, not a side effect of setup:
 
 ```sh
-npx oc-agent-plugins@0.2.1 info pstack --global
-npx oc-agent-plugins@0.2.1 doctor --global
-npx oc-agent-plugins@0.2.1 update pstack --global
+npx oc-agent-plugins@0.2.2 info pstack --global
+npx oc-agent-plugins@0.2.2 doctor --global
+npx oc-agent-plugins@0.2.2 update pstack --global
 ```
 
 For pstack and Matt Pocock, manager `update` only recopies the pinned local stage; it does not fetch upstream changes. For a deliberate upstream refresh, use manager `uninstall` for that package, preserve and move its corresponding `setup-sources/<name>` directory aside, then rerun setup. No automatic stage refresh is implemented. Native content stays live; compatibility stages and vendor snapshots stay pinned. Staging receipts use digest version 2 with length-framed paths, entry types, modes and file bytes. Older receipts are rejected rather than silently adopted; use the same deliberate refresh procedure.

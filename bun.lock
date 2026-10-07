@@ -6,7 +6,7 @@
       "name": "opencode-setup",
       "dependencies": {
         "jsonc-parser": "3.3.1",
-        "oc-agent-plugins": "0.2.1",
+        "oc-agent-plugins": "0.2.2",
       },
       "devDependencies": {
         "@types/bun": "1.4.2",
@@ -659,7 +659,7 @@
 
     "obug": ["obug@2.2.1", "", {}, "sha512-XrsrhT5sybtKI6wakr2SPOlGZWWYbUXZ7a0jT8/QOeAPau+1X/bSegNe5YR75oJmEZQbKningirmGOEJCIk61Q=="],
 
-    "oc-agent-plugins": ["oc-agent-plugins@0.2.1", "", { "dependencies": { "@opencode/plugin": "2.0.24", "yaml": "2.9.1" }, "bin": { "oc-agent-plugins": "dist/cli.js" } }, "sha512-0GYBmJb+aatGR59Hjog9i4IPqIWar/r591wy9ZHR39ySRGH0MZDV2HMP8ggc8FwSW0UKedH4SO33rb3kI+awTQ=="],
+    "oc-agent-plugins": ["oc-agent-plugins@0.2.2", "", { "dependencies": { "@opencode/plugin": "2.0.24", "yaml": "2.9.1" }, "bin": { "oc-agent-plugins": "dist/cli.js" } }, "sha512-+RaRjkB2P7jxtbCvTJs+yyRv4gpS1hKeX3oOkIxsJ7rD224V6IDC8Jnh3Szr3rE957J/ZpTM6zreZL+9JYZunA=="],
 
     "open": ["open@11.0.4", "", { "dependencies": { "default-browser": "^5.5.1", "define-lazy-prop": "^3.0.0", "is-in-ssh": "^1.0.0", "is-inside-container": "^1.0.0", "powershell-utils": "^0.2.1", "wsl-utils": "^1.0.0" } }, "sha512-++Zlftm0kVLPmzC06t6epuWmcRMDbI4z5P3NNX979WA/k23+NtSOynEGzsVfZwguKw2mi5umVgnBlJQMwRz4Pg=="],
 

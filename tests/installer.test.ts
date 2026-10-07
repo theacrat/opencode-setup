@@ -242,7 +242,7 @@ test("npm default invokes the published manager without downloads or dry-run wri
   });
   expect(result.stderr).toBe("");
   expect(result.status).toBe(0);
-  expect(result.stdout).toContain("Would register oc-agent-plugins@0.2.1");
+  expect(result.stdout).toContain("Would register oc-agent-plugins@0.2.2");
   expect(result.stdout).toContain("Install cloudflare/skills");
   expect(await readdir(root)).toEqual(before);
   await expect(readFile(path.join(config, "opencode.jsonc"))).rejects.toThrow();
@@ -271,7 +271,7 @@ test.each(["oc-agent-plugins", "oc-agent-plugins@0.1.0", "local", "file", "relat
     const text = await readFile(file, "utf8");
     expect(text).toContain("// retained");
     expect(parse(text).plugins).toEqual([
-      { package: "oc-agent-plugins@0.2.1", options: { components: { mcp: false } } },
+      { package: "oc-agent-plugins@0.2.2", options: { components: { mcp: false } } },
     ]);
     const rerun = invoke();
     expect(rerun.status).toBe(0);
@@ -315,7 +315,7 @@ test.each(["absolute", "file", "relative"])(
     expect(result.status).toBe(0);
     expect(parse(await readFile(file, "utf8")).plugins).toEqual([
       unrelated,
-      { package: "oc-agent-plugins@0.2.1", options: { components: { mcp: false } } },
+      { package: "oc-agent-plugins@0.2.2", options: { components: { mcp: false } } },
     ]);
     await expect(readFile(path.join(old, "package.json"))).rejects.toThrow();
   },
@@ -332,7 +332,7 @@ test("npm default preserves an unrelated package at the former sibling location"
   expect(result.status).toBe(0);
   expect(parse(await readFile(file, "utf8")).plugins).toEqual([
     unrelated,
-    "oc-agent-plugins@0.2.1",
+    "oc-agent-plugins@0.2.2",
   ]);
 });
 
@@ -347,11 +347,11 @@ test("npm default adds the pinned string registration without adopting unrelated
   expect(first.status).toBe(0);
   expect(parse(await readFile(file, "utf8")).plugins).toEqual([
     unrelated,
-    "oc-agent-plugins@0.2.1",
+    "oc-agent-plugins@0.2.2",
   ]);
   await put(file, JSON.stringify({ plugins: ["oc-agent-plugins@0.1.0"] }));
   expect(invoke().status).toBe(0);
-  expect(parse(await readFile(file, "utf8")).plugins).toEqual(["oc-agent-plugins@0.2.1"]);
+  expect(parse(await readFile(file, "utf8")).plugins).toEqual(["oc-agent-plugins@0.2.2"]);
 });
 
 test("installs exact vendors, keeps comments/options and aliases with full resources, reruns without writes", async () => {
