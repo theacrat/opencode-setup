@@ -1,22 +1,15 @@
-import { spawnSync } from "node:child_process";
-import {
-  mkdir,
-  readFile,
-  readdir,
-  realpath,
-  rename,
-  symlink,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
-import { homedir } from "node:os";
-import { createRequire } from "node:module";
+// oxlint-disable-next-line import/no-nodejs-modules -- This CLI requires native filesystem and process APIs.
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { applyEdits, modify, parse, type ParseError } from "jsonc-parser";
-import { VENDORS } from "./vendors.ts";
+
+import { adapterSource, manager } from "./adapter.ts";
+import { configPath } from "./config-path.ts";
+import { documents, planConfiguration, writeConfiguration } from "./configuration.ts";
 import { stat } from "./filesystem.ts";
-import { stagedSource, stageVendor, validateStage } from "./staging.ts";
+import { pendingVendors, validatePending } from "./inventory.ts";
+import { skillsFrom, validateView, createView } from "./native-skills.ts";
+import type { Environment } from "./platform.ts";
+import { sequence } from "./sequence.ts";
+import { stagedSource, stageVendor } from "./staging.ts";
 
 const HELP = `Install OpenCode V2 vendor plugins and native ai-config skills.
 
@@ -30,419 +23,107 @@ Existing healthy owned vendor snapshots are skipped, including disabled packages
 Use the adapter's update command explicitly to refresh snapshots.
 --help, -h show this help.`;
 
-type ObjectValue = Record<string, unknown>;
-const ADAPTER_VERSION = "0.2.2";
-const ADAPTER_SPEC = `oc-agent-plugins@${ADAPTER_VERSION}`;
-
-function isNpmAdapter(reference: string): boolean {
-  return /^oc-agent-plugins(?:@[^\s]+)?$/u.test(reference);
-}
-
-async function adapterSource(override: string | undefined) {
-  const packageFile = override
-    ? path.join(await realpath(path.resolve(override)), "package.json")
-    : createRequire(import.meta.url).resolve("oc-agent-plugins/package.json");
-  const directory = await realpath(path.dirname(packageFile));
-  const pkg = object(JSON.parse(await readFile(packageFile, "utf8")), "adapter package.json");
-  const bin =
-    typeof pkg.bin === "string"
-      ? pkg.bin
-      : object(pkg.bin ?? {}, "adapter bin")["oc-agent-plugins"];
-  const cli = path.resolve(directory, typeof bin === "string" ? bin : "dist/cli.js");
-  if (
-    pkg.name !== "oc-agent-plugins" ||
-    (!override && (pkg.version !== ADAPTER_VERSION || typeof bin !== "string")) ||
-    !contained(directory, cli) ||
-    !(await stat(cli))?.isFile() ||
-    !contained(directory, await realpath(cli)) ||
-    !(await stat(path.join(directory, "index.ts")))?.isFile()
-  )
-    throw new Error(
-      override
-        ? `Expected built oc-agent-plugins checkout at ${directory}. Run bun install and bun run build there.`
-        : `Expected installed ${ADAPTER_SPEC} with its CLI. Run bun install --frozen-lockfile.`,
-    );
-  return { directory, cli, reference: override ? directory : ADAPTER_SPEC };
-}
-
-async function isLocalAdapter(candidate: string): Promise<boolean> {
-  const file = path.join(candidate, "package.json");
-  if (!(await stat(file))?.isFile()) return false;
-  try {
-    return object(JSON.parse(await readFile(file, "utf8")), file).name === "oc-agent-plugins";
-  } catch {
-    return false;
-  }
-}
-
-function localPluginPath(reference: string, config: string): string | undefined {
-  if (reference.startsWith("file:")) return fileURLToPath(reference);
-  if (reference.startsWith(`~${path.sep}`) || reference.startsWith("~/"))
-    return path.join(homedir(), reference.slice(2));
-  if (path.isAbsolute(reference)) return reference;
-  if (reference.startsWith(".")) return path.resolve(config, reference);
-  return undefined;
-}
-
-async function matchesLocalAdapter(
-  candidate: string,
-  override: string | undefined,
-  directory: string,
-  parent: string,
-): Promise<boolean> {
-  const info = await stat(candidate);
-  if (override) return info !== undefined && (await realpath(candidate)) === directory;
-  if (!info) return path.resolve(candidate) === path.join(parent, "opencode-agent-plugins");
-  return isLocalAdapter(candidate);
-}
-interface Skill {
-  readonly name: string;
-  readonly directory: string;
-}
-interface Document {
-  readonly file: string;
-  readonly original: string;
-  readonly value: ObjectValue;
-}
-
-function object(value: unknown, label: string): ObjectValue {
-  if (typeof value !== "object" || value === null || Array.isArray(value))
-    throw new Error(`${label} must be an object`);
-  return value as ObjectValue;
-}
-
-function decode(text: string, label: string): ObjectValue {
-  const errors: ParseError[] = [];
-  const value: unknown = parse(text, errors, { allowTrailingComma: true, disallowComments: false });
-  if (errors.length > 0)
-    throw new Error(`Malformed JSON/JSONC in ${label} (offset ${errors[0]?.offset})`);
-  return object(value, label);
-}
-
-function contained(root: string, target: string): boolean {
-  const relative = path.relative(root, target);
-  return (
-    relative === "" ||
-    (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))
-  );
-}
-
-function segment(name: unknown): string {
-  if (typeof name !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(name) || name.length > 64)
-    throw new Error(`Invalid skill alias: ${String(name)}`);
-  return name;
-}
-
-async function skillsFrom(checkout: string): Promise<Skill[]> {
-  const root = await realpath(checkout);
-  const data = object(
-    JSON.parse(await readFile(path.join(root, "sources.json"), "utf8")),
-    "sources.json",
-  );
-  if (!Array.isArray(data.skills)) throw new Error("sources.json skills must be an array");
-  const skills = new Map<string, Skill>();
-  async function add(name: string, directory: string) {
-    const canonical = await realpath(directory);
-    if (!contained(root, canonical))
-      throw new Error(`Skill escapes ai-config checkout: ${directory}`);
-    if (
-      !(await stat(canonical))?.isDirectory() ||
-      !(await stat(path.join(canonical, "SKILL.md")))?.isFile()
-    )
-      throw new Error(`Missing skill directory or SKILL.md: ${directory}`);
-    if (skills.has(name)) throw new Error(`Duplicate native skill alias: ${name}`);
-    skills.set(name, { name, directory: canonical });
-  }
-  for (const entry of data.skills) {
-    const source = object(entry, "sources.json skill");
-    const name = segment(source.name);
-    if (typeof source.root !== "string" || typeof source.path !== "string")
-      throw new Error(`Missing root/path for ${name}`);
-    const sourceRoot = path.resolve(root, source.root);
-    const origin = path.relative(root, sourceRoot).replaceAll("\\", "/");
-    if (
-      VENDORS.some((vendor) =>
-        vendor.excludedRoots.some(
-          (excluded) => origin === excluded || origin.startsWith(`${excluded}/`),
-        ),
-      )
-    )
-      continue;
-    if (!contained(root, sourceRoot) || path.isAbsolute(source.path))
-      throw new Error(`Unsafe source path for ${name}`);
-    const candidates = [path.resolve(sourceRoot, source.path), path.resolve(root, source.path)];
-    let directory: string | undefined;
-    for (const candidate of candidates) {
-      if (
-        contained(sourceRoot, candidate) &&
-        (await stat(path.join(candidate, "SKILL.md")))?.isFile()
-      ) {
-        directory = candidate;
-        break;
-      }
-    }
-    if (directory === undefined)
-      throw new Error(`Cannot resolve ${name} from root ${source.root} and path ${source.path}`);
-    if (!contained(await realpath(sourceRoot), await realpath(directory)))
-      throw new Error(`Skill escapes declared source root: ${name}`);
-    await add(name, directory);
-  }
-  const personal = path.join(root, "personal", "skills");
-  if ((await stat(personal))?.isDirectory()) {
-    for (const entry of await readdir(personal, { withFileTypes: true })) {
-      if (entry.isDirectory() || entry.isSymbolicLink())
-        await add(segment(entry.name), path.join(personal, entry.name));
-    }
-  }
-  return [...skills.values()].sort((a, b) => a.name.localeCompare(b.name));
-}
-
-async function documents(config: string): Promise<Document[]> {
-  const docs: Document[] = [];
-  for (const name of ["opencode.json", "opencode.jsonc"]) {
-    const file = path.join(config, name);
-    const info = await stat(file);
-    if (info === undefined) continue;
-    if (!info.isFile() || info.isSymbolicLink())
-      throw new Error(`Config must be a regular file: ${file}`);
-    const original = await readFile(file, "utf8");
-    const value = decode(original, file);
-    if (
-      value.skills !== undefined &&
-      (!Array.isArray(value.skills) ||
-        !value.skills.every((item: unknown) => typeof item === "string"))
-    )
-      throw new Error(`skills must be a string array in ${file}`);
-    if (value.plugins !== undefined) {
-      if (!Array.isArray(value.plugins)) throw new Error(`plugins must be an array in ${file}`);
-      for (const item of value.plugins) {
-        if (
-          typeof item !== "string" &&
-          typeof object(item, `plugin in ${file}`).package !== "string"
-        )
-          throw new Error(`Invalid plugin entry in ${file}`);
-      }
-    }
-    docs.push({ file, original, value });
-  }
-  return docs;
-}
-
-function manager(cli: string, config: string, args: string[]): ObjectValue {
-  const result = spawnSync("node", [cli, ...args, "--global", "--json"], {
-    env: { ...process.env, OPENCODE_CONFIG_DIR: config },
-    encoding: "utf8",
-  });
-  if (result.error)
-    throw new Error(`Cannot run adapter manager. Install Node >=22.14: ${result.error.message}`);
-  if (result.status !== 0)
-    throw new Error(
-      `Adapter manager ${args[0]} failed: ${result.stderr.trim() || result.stdout.trim()}`,
-    );
-  return object(JSON.parse(result.stdout), "adapter manager response");
-}
-
-async function validateView(view: string, skills: Skill[]) {
-  const info = await stat(view);
-  if (info === undefined) return;
-  if (!info.isDirectory() || info.isSymbolicLink())
-    throw new Error(`Native skill view must be a regular directory: ${view}`);
-  const expected = new Map(skills.map((skill) => [skill.name, skill.directory]));
-  for (const name of await readdir(view)) {
-    const link = path.join(view, name);
-    if (
-      !(await stat(link))?.isSymbolicLink() ||
-      !expected.has(name) ||
-      (await realpath(link)) !== expected.get(name)
-    )
-      throw new Error(
-        `Conflicting native skill view entry: ${link}. Move the old view aside and rerun; it will not be overwritten.`,
-      );
-  }
-}
-
-export async function run(argv: string[]): Promise<void> {
-  if (argv.includes("--help") || argv.includes("-h")) {
-    console.log(HELP);
-    return;
-  }
+function argumentsFrom(argv: string[]) {
   const options = new Map<string, string>();
   let dryRun = false;
-  for (let index = 0; index < argv.length; index++) {
+  for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--dry-run") {
       dryRun = true;
       continue;
     }
-    if (!arg || !["--adapter", "--ai-config", "--config-dir"].includes(arg))
+    if (!arg || !["--adapter", "--ai-config", "--config-dir"].includes(arg)) {
       throw new Error(`Unknown argument ${arg}. Use --help.`);
-    const value = argv[++index];
-    if (!value || value.startsWith("--") || options.has(arg))
+    }
+    const value = argv[(index += 1)];
+    if (!value || value.startsWith("--") || options.has(arg)) {
       throw new Error(`Expected one path after ${arg}`);
+    }
     options.set(arg, value);
   }
-  const parent = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+  return { dryRun, options };
+}
+async function locations(options: Map<string, string>, env: Environment) {
+  const parent = path.resolve(import.meta.dirname, "../..");
   const override = options.get("--adapter");
   const adapter = await adapterSource(override);
   const aiConfig = path.resolve(options.get("--ai-config") ?? path.join(parent, "ai-config"));
-  const config = path.resolve(
-    options.get("--config-dir") ??
-      (process.env.OPENCODE_CONFIG_DIR ||
-        path.join(process.env.XDG_CONFIG_HOME || path.join(homedir(), ".config"), "opencode")),
-  );
+  const config = configPath(options.get("--config-dir"), env);
+  return { adapter, aiConfig, config, override, parent };
+}
+function reportPlan(
+  config: string,
+  dryRun: boolean,
+  skills: { name: string; directory: string }[],
+  pending: Awaited<ReturnType<typeof pendingVendors>>,
+  adapterEntry: string,
+  view: string,
+  file: string,
+): boolean {
+  for (const skill of skills) {
+    console.log(`Native ${skill.name} -> ${skill.directory}`);
+  }
+  for (const vendor of pending) {
+    console.log(
+      `Install ${vendor.source}${"subdir" in vendor ? ` --subdir ${vendor.subdir}` : ""}`,
+    );
+  }
+  if (dryRun) {
+    for (const vendor of pending) {
+      if (vendor.staged) {
+        console.log(
+          `Would create owned compatibility stage at ${stagedSource(config, vendor.name)}. No staging performed.`,
+        );
+      }
+    }
+    console.log(`Would register ${adapterEntry} and ${view} in ${file}. No writes performed.`);
+    return true;
+  }
+  return false;
+}
+export async function run(argv: string[], env: Environment): Promise<void> {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    console.log(HELP);
+    return;
+  }
+  const { options, dryRun } = argumentsFrom(argv);
+  const { parent, override, adapter, aiConfig, config } = await locations(options, env);
   const { cli } = adapter;
   const configInfo = await stat(config);
-  if (configInfo && (!configInfo.isDirectory() || configInfo.isSymbolicLink()))
+  if (configInfo && (!configInfo.isDirectory() || configInfo.isSymbolicLink())) {
     throw new Error(`Config target must be a regular directory: ${config}`);
+  }
   const docs = await documents(config);
   const skills = await skillsFrom(aiConfig);
   const view = path.join(config, "setup-native-skills");
   await validateView(view, skills);
-  const registrations: { doc: Document; entry: unknown; reference: string; index: number }[] = [];
-  for (const doc of docs)
-    for (const [index, entry] of ((doc.value.plugins ?? []) as unknown[]).entries()) {
-      const reference = typeof entry === "string" ? entry : object(entry, "plugin").package;
-      if (typeof reference !== "string") continue;
-      const candidate = localPluginPath(reference, config);
-      if (
-        isNpmAdapter(reference) ||
-        (candidate && (await matchesLocalAdapter(candidate, override, adapter.directory, parent)))
-      )
-        registrations.push({ doc, entry, reference, index });
-    }
-  if (registrations.length > 1)
-    throw new Error("Adapter is registered more than once; remove duplicate entries before setup.");
-  const registration = registrations[0];
-  const target = registration?.doc ??
-    docs.find((doc) => doc.file.endsWith(".jsonc")) ??
-    docs[0] ?? { file: path.join(config, "opencode.jsonc"), original: "{}\n", value: {} };
-  let updated = target.original;
-  const formattingOptions = {
-    insertSpaces: true,
-    tabSize: 2,
-    eol: target.original.includes("\r\n") ? "\r\n" : "\n",
-  };
+  const { target, updated } = await planConfiguration(
+    docs,
+    config,
+    view,
+    adapter,
+    override,
+    parent,
+  );
   const adapterEntry = adapter.reference;
-  if (!registration)
-    updated = applyEdits(
-      updated,
-      modify(
-        updated,
-        target.value.plugins === undefined ? ["plugins"] : ["plugins", -1],
-        target.value.plugins === undefined ? [adapterEntry] : adapterEntry,
-        { formattingOptions },
-      ),
-    );
-  else if (!override || isNpmAdapter(registration.reference))
-    updated = applyEdits(
-      updated,
-      modify(
-        updated,
-        typeof registration.entry === "string"
-          ? ["plugins", registration.index]
-          : ["plugins", registration.index, "package"],
-        adapterEntry,
-        { formattingOptions },
-      ),
-    );
-  if (!docs.some((doc) => ((doc.value.skills ?? []) as string[]).includes(view)))
-    updated = applyEdits(
-      updated,
-      modify(
-        updated,
-        target.value.skills === undefined ? ["skills"] : ["skills", -1],
-        target.value.skills === undefined ? [view] : view,
-        { formattingOptions },
-      ),
-    );
-  const inventory = manager(cli, config, ["list"]).entries;
-  if (!Array.isArray(inventory)) throw new Error("Adapter list response must include entries");
-  const pending: (typeof VENDORS)[number][] = [];
-  for (const vendor of VENDORS) {
-    const matches = inventory
-      .map((entry) => object(entry, "installation"))
-      .filter((entry) => entry.name === vendor.name);
-    if (matches.length === 0) {
-      pending.push(vendor);
-      continue;
-    }
-    const entry = matches[0];
-    if (!entry || matches.length !== 1 || entry.managed !== true || entry.problem !== undefined)
-      throw new Error(
-        `Cannot use ${vendor.name}: conflicting, edited or unmanaged installation. Inspect adapter doctor/info.`,
-      );
-    const receipt = object(entry.receipt, `${vendor.name} receipt`);
-    const source = object(receipt.source, `${vendor.name} source`);
-    const matchesSource = vendor.staged
-      ? source.kind === "local" && source.path === stagedSource(config, vendor.name)
-      : source.kind === "git" &&
-        source.url === `https://github.com/${vendor.source}.git` &&
-        source.ref === undefined &&
-        source.subdir === undefined;
-    if (!matchesSource)
-      throw new Error(
-        `Source conflict for ${vendor.name}; expected ${vendor.source}. Existing snapshot left untouched.`,
-      );
-    if (vendor.staged) await validateStage(config, vendor.name);
-    console.log(
-      `Skip ${vendor.name} (healthy managed snapshot, ${entry.enabled ? "enabled" : "disabled"})`,
-    );
-  }
+  const pending = await pendingVendors(cli, config, env);
   console.log(`${dryRun ? "Dry run" : "Target"}: ${config}`);
-  for (const vendor of pending)
-    if (vendor.staged) {
-      const cache = path.join(config, "setup-sources", vendor.name);
-      if (await stat(cache)) await validateStage(config, vendor.name);
-    }
-  const stageParent = await stat(path.join(config, "setup-sources"));
-  if (stageParent && (!stageParent.isDirectory() || stageParent.isSymbolicLink()))
-    throw new Error("setup-sources must be a regular owned directory");
-  for (const skill of skills) console.log(`Native ${skill.name} -> ${skill.directory}`);
-  for (const vendor of pending)
-    console.log(
-      `Install ${vendor.source}${"subdir" in vendor ? ` --subdir ${vendor.subdir}` : ""}`,
-    );
-  if (dryRun) {
-    for (const vendor of pending)
-      if (vendor.staged)
-        console.log(
-          `Would create owned compatibility stage at ${stagedSource(config, vendor.name)}. No staging performed.`,
-        );
-    console.log(
-      `Would register ${adapterEntry} and ${view} in ${target.file}. No writes performed.`,
-    );
+  await validatePending(config, pending);
+  if (reportPlan(config, dryRun, skills, pending, adapterEntry, view, target.file)) {
     return;
   }
   try {
-    for (const vendor of pending) {
-      const source = vendor.staged ? await stageVendor(config, vendor.name) : vendor.source;
-      manager(cli, config, ["install", source]);
+    await sequence(pending, async (vendor) => {
+      const source = vendor.staged ? await stageVendor(config, vendor.name, env) : vendor.source;
+      await manager(cli, config, ["install", source], env);
       console.log(`Installed ${vendor.name}`);
-    }
-    await mkdir(view, { recursive: true });
-    for (const skill of skills) {
-      const link = path.join(view, skill.name);
-      if (!(await stat(link)))
-        await symlink(skill.directory, link, process.platform === "win32" ? "junction" : "dir");
-    }
-    if (updated !== target.original) {
-      const current = (await stat(target.file)) ? await readFile(target.file, "utf8") : "{}\n";
-      if (current !== target.original)
-        throw new Error(`Configuration changed during setup: ${target.file}`);
-      const temporary = `${target.file}.setup-${process.pid}-${crypto.randomUUID()}`;
-      await writeFile(temporary, updated, {
-        flag: "wx",
-        mode: (await stat(target.file))?.mode ?? 0o600,
-      });
-      try {
-        await rename(temporary, target.file);
-      } finally {
-        if (await stat(temporary)) await unlink(temporary);
-      }
-    }
+    });
+    await createView(view, skills);
+    await writeConfiguration(target, updated);
   } catch (error) {
     throw new Error(
       `Partial setup; earlier installed snapshots or native links are retained. Rerun after resolving the error. ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
   }
   console.log(`Configured ${target.file}. No trust granted or OpenCode/MCP processes started.`);

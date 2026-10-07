@@ -4,23 +4,27 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "check": "bun run lint && bun run fmt:check && bun run test",
+    "commitlint": "commitlint --config commitlint.config.ts",
+    "fmt": "node node_modules/oxfmt/bin/oxfmt -c oxfmt.config.ts",
+    "fmt:check": "node node_modules/oxfmt/bin/oxfmt -c oxfmt.config.ts --check",
+    "lint": "node node_modules/oxlint/bin/oxlint -c oxlint.config.ts --deny-warnings --type-aware --type-check",
     "setup": "bun src/cli.ts",
-    "test": "vitest run",
-    "lint": "oxlint",
-    "fmt": "oxfmt",
-    "fmt:check": "oxfmt --check",
-    "typecheck": "tsc --noEmit",
-    "check": "bun run lint && bun run fmt:check && bun run typecheck && bun run test"
+    "test": "vitest run"
   },
   "dependencies": {
     "jsonc-parser": "3.3.1",
     "oc-agent-plugins": "0.2.2"
   },
   "devDependencies": {
+    "@commitlint/cli": "21.2.3",
+    "@commitlint/config-conventional": "21.2.3",
+    "@commitlint/types": "21.2.3",
     "@types/bun": "1.4.2",
     "lefthook": "2.1.17",
     "oxfmt": "0.72.0",
     "oxlint": "1.87.0",
+    "oxlint-tsgolint": "7.0.2003",
     "typescript": "7.0.2",
     "vitest": "5.0.3"
   }

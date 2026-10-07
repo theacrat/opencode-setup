@@ -11,6 +11,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
@@ -19,3 +21,35 @@ jobs:
           node-version: 24
       - run: bun install --frozen-lockfile
       - run: bun run check
+  commits:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: bun install --frozen-lockfile
+      - name: Check conventional commits
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ]; then
+            base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          elif [ -n "$BEFORE_SHA" ] && ! [[ "$BEFORE_SHA" =~ ^0+$ ]] && git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null; then
+            base="$BEFORE_SHA"
+          else
+            base=$(git rev-parse --verify "$HEAD_SHA^" 2>/dev/null || true)
+          fi
+          if [ -n "$base" ]; then
+            bun run commitlint --from "$base" --to "$HEAD_SHA" --strict
+          else
+            git show -s --format=%B "$HEAD_SHA" | bun run commitlint --strict
+          fi

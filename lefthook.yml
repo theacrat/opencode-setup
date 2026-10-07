@@ -2,3 +2,7 @@ pre-commit:
   commands:
     check:
       run: bun run check
+commit-msg:
+  commands:
+    conventional:
+      run: bun run commitlint --edit "{1}"

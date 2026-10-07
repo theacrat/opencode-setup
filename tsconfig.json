@@ -1,14 +1,38 @@
 {
+  "$schema": "https://www.schemastore.org/tsconfig",
   "compilerOptions": {
-    "target": "ESNext",
-    "module": "Preserve",
-    "moduleResolution": "Bundler",
-    "strict": true,
+    "skipLibCheck": true,
     "noEmit": true,
+    "erasableSyntaxOnly": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "jsx": "react-jsx",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "moduleDetection": "force",
+    "target": "esnext",
+    "useDefineForClassFields": true,
     "allowImportingTsExtensions": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "noUncheckedSideEffectImports": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "exactOptionalPropertyTypes": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noPropertyAccessFromIndexSignature": true,
     "noUncheckedIndexedAccess": true,
-    "types": ["bun"],
-    "paths": { "@/*": ["./src/*"], "#/*": ["./src/generated/*"] }
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "paths": {
+      "@/*": ["./src/*"],
+      "#/*": ["./src/generated/*"]
+    },
+    "strict": true,
+    "types": ["bun", "node"]
   },
-  "include": ["src", "tests"]
+  "include": ["src", "tests", "*.ts"]
 }

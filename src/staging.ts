@@ -1,4 +1,6 @@
-import { spawnSync } from "node:child_process";
+// oxlint-disable-next-line import/no-nodejs-modules -- This CLI requires native filesystem and process APIs.
+import { createHash } from "node:crypto";
+// oxlint-disable-next-line import/no-nodejs-modules -- This CLI requires native filesystem and process APIs.
 import {
   lstat,
   mkdir,
@@ -11,12 +13,17 @@ import {
   rename,
   realpath,
 } from "node:fs/promises";
+// oxlint-disable-next-line import/no-nodejs-modules -- This CLI requires native filesystem and process APIs.
 import path from "node:path";
-import { createHash } from "node:crypto";
-import { VENDORS } from "./vendors.ts";
-import { stat } from "./filesystem.ts";
 
-export async function fingerprint(directory: string): Promise<string> {
+import { stat } from "./filesystem.ts";
+import { execute } from "./platform.ts";
+import type { Environment } from "./platform.ts";
+import { sequence } from "./sequence.ts";
+import { object } from "./values.ts";
+import { VENDORS } from "./vendors.ts";
+
+async function fingerprint(directory: string): Promise<string> {
   const hash = createHash("sha256");
   function frame(value: string | Buffer) {
     const bytes = typeof value === "string" ? Buffer.from(value) : value;
@@ -24,23 +31,31 @@ export async function fingerprint(directory: string): Promise<string> {
     hash.update(bytes);
   }
   async function visit(current: string) {
-    for (const entry of (await readdir(current, { withFileTypes: true })).sort((a, b) =>
-      a.name.localeCompare(b.name),
-    )) {
-      if (entry.name === ".git") continue;
-      const file = path.join(current, entry.name);
-      if (entry.isSymbolicLink()) throw new Error(`Unsafe vendor stage symlink: ${file}`);
-      const info = await lstat(file);
-      frame(path.relative(directory, file).split(path.sep).join("/"));
-      frame(String(info.mode & 0o777));
-      if (entry.isDirectory()) {
-        frame("directory");
-        await visit(file);
-      } else if (entry.isFile()) {
-        frame("file");
-        frame(await readFile(file));
-      } else throw new Error(`Unsafe vendor staging entry: ${file}`);
-    }
+    const directoryEntries = await readdir(current, { withFileTypes: true });
+    await sequence(
+      directoryEntries.toSorted((first, second) => first.name.localeCompare(second.name)),
+      async (entry) => {
+        if (entry.name === ".git") {
+          return;
+        }
+        const file = path.join(current, entry.name);
+        if (entry.isSymbolicLink()) {
+          throw new Error(`Unsafe vendor stage symlink: ${file}`);
+        }
+        const info = await lstat(file);
+        frame(path.relative(directory, file).split(path.sep).join("/"));
+        frame(String(info.mode % 0o1000));
+        if (entry.isDirectory()) {
+          frame("directory");
+          await visit(file);
+        } else if (entry.isFile()) {
+          frame("file");
+          frame(await readFile(file));
+        } else {
+          throw new Error(`Unsafe vendor staging entry: ${file}`);
+        }
+      },
+    );
   }
   await visit(directory);
   return hash.digest("hex");
@@ -48,111 +63,88 @@ export async function fingerprint(directory: string): Promise<string> {
 
 type StagedVendor = "pstack" | "mattpocock-skills";
 function stagedVendor(name: StagedVendor) {
-  const vendor = VENDORS.find((vendor) => vendor.name === name);
-  if (!vendor) throw new Error(`Unknown staged vendor ${name}`);
+  const vendor = VENDORS.find((candidate) => candidate.name === name);
+  if (!vendor) {
+    throw new Error(`Unknown staged vendor ${name}`);
+  }
   return { repository: vendor.source, subdir: "subdir" in vendor ? vendor.subdir : "" };
 }
 
-export async function validateStage(config: string, name: StagedVendor): Promise<void> {
-  const source = stagedSource(config, name);
-  const vendor = stagedVendor(name);
-  for (const directory of [
-    path.join(config, "setup-sources"),
-    path.join(config, "setup-sources", name),
-    path.join(config, "setup-sources", name, "checkout"),
-    source,
-  ]) {
-    const info = await lstat(directory);
-    if (!info.isDirectory() || info.isSymbolicLink())
-      throw new Error(`Unsafe staged directory: ${directory}`);
-  }
-  const markerFile = path.join(config, "setup-sources", name, "compatibility.json");
-  if (!(await lstat(markerFile)).isFile() || (await lstat(markerFile)).isSymbolicLink())
-    throw new Error(`Unsafe staging receipt: ${markerFile}`);
-  const marker = JSON.parse(
-    await readFile(path.join(config, "setup-sources", name, "compatibility.json"), "utf8"),
-  ) as Record<string, unknown>;
-  if (
-    marker.source !== `https://github.com/${vendor.repository}.git` ||
-    marker.subdir !== vendor.subdir ||
-    marker.digestVersion !== 2 ||
-    typeof marker.revision !== "string" ||
-    marker.fingerprint !== (await fingerprint(source))
-  )
-    throw new Error(
-      `Missing, edited or unowned ${name} stage at ${source}. Preserve it and move it aside deliberately before a fresh install.`,
-    );
-}
-
-export function stagedSource(config: string, name: StagedVendor): string {
+function stagedSource(config: string, name: StagedVendor): string {
   return path.join(config, "setup-sources", name, "checkout", stagedVendor(name).subdir);
 }
 
-function git(args: string[], globalConfig: string): string {
-  const result = spawnSync("git", args, {
-    encoding: "utf8",
-    env: {
-      PATH: process.env.PATH,
-      SystemRoot: process.env.SystemRoot,
-      TEMP: process.env.TEMP,
-      TMP: process.env.TMP,
-      HOME: path.dirname(globalConfig),
-      USERPROFILE: path.dirname(globalConfig),
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_CONFIG_GLOBAL: globalConfig,
+async function validateStage(config: string, name: StagedVendor): Promise<void> {
+  const source = stagedSource(config, name);
+  const vendor = stagedVendor(name);
+  await sequence(
+    [
+      path.join(config, "setup-sources"),
+      path.join(config, "setup-sources", name),
+      path.join(config, "setup-sources", name, "checkout"),
+      source,
+    ],
+    async (directory) => {
+      const info = await lstat(directory);
+      if (!info.isDirectory() || info.isSymbolicLink()) {
+        throw new Error(`Unsafe staged directory: ${directory}`);
+      }
     },
-  });
-  if (result.error || result.status !== 0)
+  );
+  const markerFile = path.join(config, "setup-sources", name, "compatibility.json");
+  const markerInfo = await lstat(markerFile);
+  if (!markerInfo.isFile() || markerInfo.isSymbolicLink()) {
+    throw new Error(`Unsafe staging receipt: ${markerFile}`);
+  }
+  const markerText = await readFile(markerFile, "utf8");
+  const marker = object(JSON.parse(markerText), "staging receipt");
+  if (
+    marker["source"] !== `https://github.com/${vendor.repository}.git` ||
+    marker["subdir"] !== vendor.subdir ||
+    marker["digestVersion"] !== 2 ||
+    typeof marker["revision"] !== "string" ||
+    marker["fingerprint"] !== (await fingerprint(source))
+  ) {
     throw new Error(
-      `Vendor staging requires Git: ${result.error?.message ?? result.stderr.trim()}`,
+      `Missing, edited or unowned ${name} stage at ${source}. Preserve it and move it aside deliberately before a fresh install.`,
     );
-  return result.stdout.trim();
+  }
+}
+
+async function git(args: string[], globalConfig: string, env: Environment): Promise<string> {
+  try {
+    const result = await execute("git", args, {
+      GIT_CONFIG_GLOBAL: globalConfig,
+      GIT_CONFIG_NOSYSTEM: "1",
+      HOME: path.dirname(globalConfig),
+      PATH: env.PATH,
+      SystemRoot: env.SystemRoot,
+      TEMP: env.TEMP,
+      TMP: env.TMP,
+      USERPROFILE: path.dirname(globalConfig),
+    });
+    return result.stdout.trim();
+  } catch (error) {
+    throw new Error(
+      `Vendor staging requires Git: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
 }
 
 async function regular(file: string, root: string): Promise<string> {
   const info = await lstat(file);
-  if (!info.isFile() || info.isSymbolicLink())
+  if (!info.isFile() || info.isSymbolicLink()) {
     throw new Error(`Expected regular staging file: ${file}`);
+  }
   const relative = path.relative(await realpath(root), await realpath(file));
-  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
     throw new Error(`Staging file escapes root: ${file}`);
+  }
   return readFile(file, "utf8");
 }
 
-export async function stageVendor(config: string, name: StagedVendor): Promise<string> {
-  const cache = path.join(config, "setup-sources", name);
-  const vendor = stagedVendor(name);
-  if (await stat(cache)) {
-    await validateStage(config, name);
-    return stagedSource(config, name);
-  }
-  const parent = path.dirname(cache);
-  await mkdir(parent, { recursive: true });
-  if ((await lstat(parent)).isSymbolicLink()) throw new Error(`Unsafe staging parent: ${parent}`);
-  const scratch = await mkdtemp(path.join(parent, `.${name}-staging-`));
-  const checkout = path.join(scratch, "checkout");
-  const source = path.join(checkout, vendor.subdir);
-  const globalConfig = path.join(scratch, "gitconfig");
-  await writeFile(globalConfig, "", { flag: "wx" });
-  const hooks = path.join(scratch, "empty-hooks");
-  await mkdir(hooks);
-  git(
-    [
-      "-c",
-      `core.hooksPath=${hooks}`,
-      "clone",
-      "--template=",
-      "--depth",
-      "1",
-      "--",
-      `https://github.com/${vendor.repository}.git`,
-      checkout,
-    ],
-    globalConfig,
-  );
-  const revision = git(["-C", checkout, "rev-parse", "HEAD"], globalConfig);
-  if (!(await lstat(source)).isDirectory() || (await lstat(source)).isSymbolicLink())
-    throw new Error(`Unsafe staged source directory: ${source}`);
+async function adjustSource(source: string, name: StagedVendor) {
   let adjustment: Record<string, unknown>;
   if (name === "pstack") {
     const rootManifest = path.join(source, "plugin.json");
@@ -167,10 +159,11 @@ export async function stageVendor(config: string, name: StagedVendor): Promise<s
       typeof manifest.description !== "string" ||
       Object.keys(manifest).some((key) => key !== "name" && key !== "description") ||
       "$schema" in manifest
-    )
+    ) {
       throw new Error(
         "pstack root manifest changed; compatibility staging must be reviewed before installation. Staging retained.",
       );
+    }
     const claude: unknown = JSON.parse(
       await regular(path.join(source, ".claude-plugin", "plugin.json"), source),
     );
@@ -179,35 +172,90 @@ export async function stageVendor(config: string, name: StagedVendor): Promise<s
       claude === null ||
       !("name" in claude) ||
       claude.name !== "pstack"
-    )
+    ) {
       throw new Error("pstack staging requires its valid Claude manifest.");
+    }
     await unlink(rootManifest);
     adjustment = { omittedManifest: original };
   } else {
     const file = path.join(source, "AGENTS.md");
     const info = await lstat(file);
     const target = info.isSymbolicLink() ? await readlink(file) : await regular(file, source);
-    if (target.trim() !== "CLAUDE.md")
+    if (target.trim() !== "CLAUDE.md") {
       throw new Error(
         "Matt Pocock AGENTS.md link changed; compatibility staging must be reviewed.",
       );
+    }
     const content = await regular(path.join(source, "CLAUDE.md"), source);
     await unlink(file);
     await writeFile(file, content, { flag: "wx" });
     adjustment = { materialisedLink: { path: "AGENTS.md", target: "CLAUDE.md" } };
   }
+  return adjustment;
+}
+
+async function cloneSource(
+  cache: string,
+  vendor: { repository: string; subdir: string },
+  name: StagedVendor,
+  env: Environment,
+) {
+  const parent = path.dirname(cache);
+  await mkdir(parent, { recursive: true });
+  const parentInfo = await lstat(parent);
+  if (parentInfo.isSymbolicLink()) {
+    throw new Error(`Unsafe staging parent: ${parent}`);
+  }
+  const scratch = await mkdtemp(path.join(parent, `.${name}-staging-`));
+  const checkout = path.join(scratch, "checkout");
+  const source = path.join(checkout, vendor.subdir);
+  const globalConfig = path.join(scratch, "gitconfig");
+  await writeFile(globalConfig, "", { flag: "wx" });
+  const hooks = path.join(scratch, "empty-hooks");
+  await mkdir(hooks);
+  await git(
+    [
+      "-c",
+      `core.hooksPath=${hooks}`,
+      "clone",
+      "--template=",
+      "--depth",
+      "1",
+      "--",
+      `https://github.com/${vendor.repository}.git`,
+      checkout,
+    ],
+    globalConfig,
+    env,
+  );
+  const revision = await git(["-C", checkout, "rev-parse", "HEAD"], globalConfig, env);
+  return { revision, scratch, source };
+}
+async function stageVendor(config: string, name: StagedVendor, env: Environment): Promise<string> {
+  const cache = path.join(config, "setup-sources", name);
+  const vendor = stagedVendor(name);
+  if (await stat(cache)) {
+    await validateStage(config, name);
+    return stagedSource(config, name);
+  }
+  const { scratch, source, revision } = await cloneSource(cache, vendor, name, env);
+  const sourceInfo = await lstat(source);
+  if (!sourceInfo.isDirectory() || sourceInfo.isSymbolicLink()) {
+    throw new Error(`Unsafe staged source directory: ${source}`);
+  }
+  const adjustment = await adjustSource(source, name);
   await writeFile(
     path.join(scratch, "compatibility.json"),
     JSON.stringify(
       {
+        digestVersion: 2,
+        revision,
         source: `https://github.com/${vendor.repository}.git`,
         subdir: vendor.subdir,
-        revision,
-        digestVersion: 2,
         ...adjustment,
         fingerprint: await fingerprint(source),
       },
-      null,
+      undefined,
       2,
     ),
     { flag: "wx", mode: 0o600 },
@@ -221,3 +269,5 @@ export async function stageVendor(config: string, name: StagedVendor): Promise<s
   );
   return stagedSource(config, name);
 }
+
+export { fingerprint, stagedSource, validateStage, stageVendor };
