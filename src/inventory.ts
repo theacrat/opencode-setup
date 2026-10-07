@@ -111,4 +111,4 @@ async function validatePending(config: string, pending: Vendor[]) {
 async function validateAllStages(config: string) {
   await validatePending(config, [...VENDORS]);
 }
-export { pendingVendors, validatePending, validateAllStages };
+export { pendingVendors, validateAllStages };

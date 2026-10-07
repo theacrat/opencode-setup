@@ -67,7 +67,7 @@ async function publishNatives(
     await publishReplacement(
       replacement,
       async () => {
-        await stat(replacement.cache);
+        await validateSnapshot(config, source);
       },
       async () => {
         if (await stat(replacement.cache)) {
