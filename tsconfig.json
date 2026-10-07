@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "noUncheckedIndexedAccess": true,
+    "types": ["bun"],
+    "paths": { "@/*": ["./src/*"], "#/*": ["./src/generated/*"] }
+  },
+  "include": ["src", "tests"]
+}
