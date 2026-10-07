@@ -10,4 +10,6 @@
 - Install hooks with `bunx lefthook install`. Commit messages must use conventional commits; the commit-msg hook and CI enforce this. Keep comments only where they explain a non-obvious reason.
 - Narrow compatibility exception: installer-owned immutable pstack/Matt staging may retrieve fixed upstream repositories and digest its adjusted source tree. Only the checked invalid pstack manifest and Matt's checked in-tree AGENTS.md link are adjusted. The adapter retains all installed snapshot, receipt, fingerprint, update and conflict ownership. Do not generalise this into another package manager.
 
+- Native sources are a fixed typed registry, not plugin packages. Preserve complete upstream resource and attribution trees in owned snapshots outside discovery; validate receipts and integrity before reuse. The local bundled thea-mode tree is authoritative and has no remote source. Its guidance and reference templates are byte-preserved resources, narrowly excluded from formatting and outside executable lint inputs.
+
 - Inline exceptions are limited to native Node imports required by the CLI/tests, the CLI's one-time environment capture and executable top-level await, and Node promisify's execFile callback typing. Keep the full template rules; do not disable rules to avoid fixes.

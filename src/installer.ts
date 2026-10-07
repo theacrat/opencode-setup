@@ -6,16 +6,16 @@ import { configPath } from "./config-path.ts";
 import { documents, planConfiguration, writeConfiguration } from "./configuration.ts";
 import { stat } from "./filesystem.ts";
 import { pendingVendors, validatePending } from "./inventory.ts";
-import { skillsFrom, validateView, createView } from "./native-skills.ts";
+import { skillsFrom, validateView, createView, prepareSources } from "./native-skills.ts";
 import type { Environment } from "./platform.ts";
 import { sequence } from "./sequence.ts";
 import { stagedSource, stageVendor } from "./staging.ts";
 
-const HELP = `Install OpenCode V2 vendor plugins and native ai-config skills.
+const HELP = `Install OpenCode V2 vendor plugins and self-contained native skills.
 
-Usage: bun run setup [--dry-run] [--adapter PATH] [--ai-config PATH] [--config-dir PATH]
+Usage: bun run setup [--dry-run] [--adapter PATH] [--config-dir PATH]
 
-Defaults: installed oc-agent-plugins@0.2.2 and sibling ai-config checkout.
+Defaults: installed oc-agent-plugins@0.2.2 and fixed upstream native sources.
 --adapter PATH selects an optional built local adapter instead of npm.
 Config: OPENCODE_CONFIG_DIR, XDG_CONFIG_HOME/opencode, ~/.config/opencode.
 --dry-run validates and reports without writes or network retrieval.
@@ -32,7 +32,7 @@ function argumentsFrom(argv: string[]) {
       dryRun = true;
       continue;
     }
-    if (!arg || !["--adapter", "--ai-config", "--config-dir"].includes(arg)) {
+    if (!arg || !["--adapter", "--config-dir"].includes(arg)) {
       throw new Error(`Unknown argument ${arg}. Use --help.`);
     }
     const value = argv[(index += 1)];
@@ -47,9 +47,8 @@ async function locations(options: Map<string, string>, env: Environment) {
   const parent = path.resolve(import.meta.dirname, "../..");
   const override = options.get("--adapter");
   const adapter = await adapterSource(override);
-  const aiConfig = path.resolve(options.get("--ai-config") ?? path.join(parent, "ai-config"));
   const config = configPath(options.get("--config-dir"), env);
-  return { adapter, aiConfig, config, override, parent };
+  return { adapter, config, override, parent };
 }
 function reportPlan(
   config: string,
@@ -87,14 +86,14 @@ export async function run(argv: string[], env: Environment): Promise<void> {
     return;
   }
   const { options, dryRun } = argumentsFrom(argv);
-  const { parent, override, adapter, aiConfig, config } = await locations(options, env);
+  const { parent, override, adapter, config } = await locations(options, env);
   const { cli } = adapter;
   const configInfo = await stat(config);
   if (configInfo && (!configInfo.isDirectory() || configInfo.isSymbolicLink())) {
     throw new Error(`Config target must be a regular directory: ${config}`);
   }
   const docs = await documents(config);
-  const skills = await skillsFrom(aiConfig);
+  const skills = await skillsFrom(config, path.join(parent, "ai-config"));
   const view = path.join(config, "setup-native-skills");
   await validateView(view, skills);
   const { target, updated } = await planConfiguration(
@@ -110,9 +109,11 @@ export async function run(argv: string[], env: Environment): Promise<void> {
   console.log(`${dryRun ? "Dry run" : "Target"}: ${config}`);
   await validatePending(config, pending);
   if (reportPlan(config, dryRun, skills, pending, adapterEntry, view, target.file)) {
+    await prepareSources(config, env, true);
     return;
   }
   try {
+    await prepareSources(config, env, false);
     await sequence(pending, async (vendor) => {
       const source = vendor.staged ? await stageVendor(config, vendor.name, env) : vendor.source;
       await manager(cli, config, ["install", source], env);

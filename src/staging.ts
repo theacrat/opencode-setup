@@ -23,7 +23,7 @@ import { sequence } from "./sequence.ts";
 import { object } from "./values.ts";
 import { VENDORS } from "./vendors.ts";
 
-async function fingerprint(directory: string): Promise<string> {
+async function fingerprint(directory: string, includeGit = false): Promise<string> {
   const hash = createHash("sha256");
   function frame(value: string | Buffer) {
     const bytes = typeof value === "string" ? Buffer.from(value) : value;
@@ -35,7 +35,7 @@ async function fingerprint(directory: string): Promise<string> {
     await sequence(
       directoryEntries.toSorted((first, second) => first.name.localeCompare(second.name)),
       async (entry) => {
-        if (entry.name === ".git") {
+        if (entry.name === ".git" && !includeGit) {
           return;
         }
         const file = path.join(current, entry.name);
@@ -194,25 +194,31 @@ async function adjustSource(source: string, name: StagedVendor) {
   return adjustment;
 }
 
+async function gitWorkspace(parent: string, prefix: string) {
+  await mkdir(parent, { recursive: true });
+  const parentInfo = await lstat(parent);
+  if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink()) {
+    throw new Error(`Unsafe staging parent: ${parent}`);
+  }
+  const scratch = await mkdtemp(path.join(parent, prefix));
+  const globalConfig = path.join(scratch, "gitconfig");
+  await writeFile(globalConfig, "", { flag: "wx" });
+  const hooks = path.join(scratch, "empty-hooks");
+  await mkdir(hooks);
+  return { globalConfig, hooks, scratch };
+}
 async function cloneSource(
   cache: string,
   vendor: { repository: string; subdir: string },
   name: StagedVendor,
   env: Environment,
 ) {
-  const parent = path.dirname(cache);
-  await mkdir(parent, { recursive: true });
-  const parentInfo = await lstat(parent);
-  if (parentInfo.isSymbolicLink()) {
-    throw new Error(`Unsafe staging parent: ${parent}`);
-  }
-  const scratch = await mkdtemp(path.join(parent, `.${name}-staging-`));
+  const { scratch, globalConfig, hooks } = await gitWorkspace(
+    path.dirname(cache),
+    `.${name}-staging-`,
+  );
   const checkout = path.join(scratch, "checkout");
   const source = path.join(checkout, vendor.subdir);
-  const globalConfig = path.join(scratch, "gitconfig");
-  await writeFile(globalConfig, "", { flag: "wx" });
-  const hooks = path.join(scratch, "empty-hooks");
-  await mkdir(hooks);
   await git(
     [
       "-c",
@@ -270,4 +276,4 @@ async function stageVendor(config: string, name: StagedVendor, env: Environment)
   return stagedSource(config, name);
 }
 
-export { fingerprint, stagedSource, validateStage, stageVendor };
+export { fingerprint, git, gitWorkspace, stagedSource, validateStage, stageVendor };

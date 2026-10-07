@@ -8,6 +8,7 @@ import {
   readFile,
   readdir,
   realpath,
+  readlink,
   rm,
   symlink,
   writeFile,
@@ -88,6 +89,7 @@ async function fixture({ npm = false, relocated = false } = {}) {
   if (relocated) {
     const setup = path.join(root, "setup");
     await cp(path.resolve("src"), path.join(setup, "src"), { recursive: true });
+    await cp(path.resolve("skills"), path.join(setup, "skills"), { recursive: true });
     await symlink(
       path.resolve("node_modules"),
       path.join(setup, "node_modules"),
@@ -96,7 +98,6 @@ async function fixture({ npm = false, relocated = false } = {}) {
     installer = path.join(setup, "src/cli.ts");
   }
   const adapter = path.join(root, "adapter checkout");
-  const ai = path.join(root, "ai config");
   const config = path.join(root, "target config");
   const upstream = path.join(root, "pstack-upstream");
   const matt = path.join(root, "matt-upstream");
@@ -104,6 +105,53 @@ async function fixture({ npm = false, relocated = false } = {}) {
     "https://github.com/mattpocock/skills.git": matt,
     "https://github.com/theacrat/pstack-generic.git": upstream,
   };
+  const nativeSources = [
+    { directories: ["skills/frontend-design"], repository: "anthropics/skills" },
+    {
+      directories: [
+        "skills/web-design-guidelines",
+        "skills/react-best-practices",
+        "skills/composition-patterns",
+      ],
+      repository: "vercel-labs/agent-skills",
+    },
+    {
+      directories: [
+        "plugins/property-based-testing/skills/property-based-testing",
+        "plugins/mutation-testing/skills/mutation-testing",
+        "plugins/sharp-edges/skills/sharp-edges",
+      ],
+      repository: "trailofbits/skills",
+    },
+  ];
+  await sequence(nativeSources, async (source) => {
+    const checkout = path.join(root, source.repository.split("/")[0] ?? "upstream");
+    await sequence(source.directories, async (directory) => {
+      const name = path.basename(directory);
+      await put(
+        path.join(checkout, directory, "SKILL.md"),
+        `---\nname: ${name}\ndescription: Fixture skill\n---\nRead references/rules.md`,
+      );
+      await put(path.join(checkout, directory, "references/rules.md"), "Full resources");
+    });
+    await put(path.join(checkout, "LICENSE"), "Fixture licence");
+    await writeFile(path.join(checkout, "binary.dat"), Buffer.from([0, 255, 10, 13, 32]));
+    await put(path.join(checkout, "skills/unselected/SKILL.md"), "Unselected");
+    await gitFixture(["init", checkout]);
+    await gitFixture(["-C", checkout, "add", "."]);
+    await gitFixture([
+      "-C",
+      checkout,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "-m",
+      "fixture",
+    ]);
+    replacements[`https://github.com/${source.repository}.git`] = checkout;
+  });
   await sequence(
     vendors.filter((vendor) => !["pstack", "mattpocock-skills"].includes(vendor.name)),
     async (vendor) => {
@@ -161,7 +209,7 @@ async function fixture({ npm = false, relocated = false } = {}) {
   await put(
     wrapper,
     `import {spawnSync} from 'node:child_process';
-if(process.env["SETUP_TEST_NO_NETWORK"]) { console.error('Git retrieval forbidden'); process.exit(1); }
+ if(${JSON.stringify(path.join(root, "no-network"))} && require('node:fs').existsSync(${JSON.stringify(path.join(root, "no-network"))})) { console.error('Git retrieval forbidden'); process.exit(1); }
 const replacements = ${JSON.stringify(replacements)};
 const result=spawnSync(${JSON.stringify(gitBinary)},process.argv.slice(2).map(arg=>replacements[arg]??arg),{stdio:'inherit',env:process.env});
 process.exit(result.status??1);`,
@@ -222,48 +270,13 @@ if (args[0] === 'install') {
 }
 console.log(JSON.stringify({entries}));`,
   );
-  await put(
-    path.join(ai, "sources.json"),
-    JSON.stringify({
-      skills: [
-        {
-          name: "vercel-react-best-practices",
-          path: "skills/react-best-practices",
-          root: "sources/vercel",
-        },
-        {
-          name: "checkout-relative",
-          path: "sources/other/skills/checkout-relative",
-          root: "sources/other",
-        },
-        { name: "excluded-matt", path: "missing", root: "sources/mattpocock-skills" },
-        { name: "excluded-pstack", path: "missing", root: "plugins/pstack" },
-      ],
-    }),
-  );
-  await put(
-    path.join(ai, "sources/vercel/skills/react-best-practices/SKILL.md"),
-    "---\nname: react-best-practices\ndescription: React\n---\nRead references/rules.md",
-  );
-  await put(
-    path.join(ai, "sources/vercel/skills/react-best-practices/references/rules.md"),
-    "Full resources",
-  );
-  await put(path.join(ai, "sources/vercel/skills/unselected/SKILL.md"), "Unselected");
-  await put(path.join(ai, "sources/other/skills/checkout-relative/SKILL.md"), "Checkout relative");
-  await put(path.join(ai, "personal/skills/thea-mode/SKILL.md"), "Personal");
-  const invoke = async (args: string[] = [], env: Record<string, string> = {}) =>
-    runProcess(
+  const invoke = async (args: string[] = [], env: Record<string, string> = {}) => {
+    if (env["SETUP_TEST_NO_NETWORK"]) {
+      await put(path.join(root, "no-network"), "forbidden");
+    }
+    return runProcess(
       "bun",
-      [
-        installer,
-        ...(npm ? [] : ["--adapter", adapter]),
-        "--ai-config",
-        ai,
-        "--config-dir",
-        config,
-        ...args,
-      ],
+      [installer, ...(npm ? [] : ["--adapter", adapter]), "--config-dir", config, ...args],
       {
         encoding: "utf8",
         env: {
@@ -280,7 +293,8 @@ console.log(JSON.stringify({entries}));`,
         },
       },
     );
-  return { adapter, ai, config, invoke, root };
+  };
+  return { adapter, config, invoke, root };
 }
 afterEach(async () => {
   await Promise.all(
@@ -290,6 +304,7 @@ afterEach(async () => {
 
 test("npm default invokes the published manager without downloads or dry-run writes", async () => {
   const { root, config, invoke } = await fixture({ npm: true });
+  await put(path.join(root, "no-network"), "forbidden");
   const before = await readdir(root);
   const result = await invoke(["--dry-run"], {
     SETUP_TEST_NO_NETWORK: "1",
@@ -400,7 +415,7 @@ test("npm default adds the pinned string registration without adopting unrelated
 });
 
 test("installs exact vendors, keeps comments/options and aliases with full resources, reruns without writes", async () => {
-  const { adapter, config, ai, invoke } = await fixture();
+  const { adapter, config, invoke } = await fixture();
   const file = path.join(config, "opencode.jsonc");
   await put(
     file,
@@ -422,12 +437,19 @@ test("installs exact vendors, keeps comments/options and aliases with full resou
   const view = path.join(config, "setup-native-skills");
   const directoryEntries1 = await readdir(view);
   expect(directoryEntries1.toSorted()).toEqual([
-    "checkout-relative",
+    "frontend-design",
+    "mutation-testing",
+    "property-based-testing",
+    "sharp-edges",
     "thea-mode",
+    "vercel-composition-patterns",
     "vercel-react-best-practices",
+    "web-design-guidelines",
   ]);
   expect(await realpath(path.join(view, "vercel-react-best-practices"))).toBe(
-    await realpath(path.join(ai, "sources/vercel/skills/react-best-practices")),
+    await realpath(
+      path.join(config, "setup-native-sources/vercel/checkout/skills/react-best-practices"),
+    ),
   );
   expect(
     await readFile(path.join(view, "vercel-react-best-practices/references/rules.md"), "utf8"),
@@ -440,7 +462,7 @@ test("installs exact vendors, keeps comments/options and aliases with full resou
   expect(calls).toEqual(
     vendors.map((vendor) => ["install", installedSource(config, vendor), "--global", "--json"]),
   );
-  const invocationResult3 = await invoke();
+  const invocationResult3 = await invoke([], { SETUP_TEST_NO_NETWORK: "1" });
   expect(invocationResult3.status).toBe(0);
   expect(await readFile(file, "utf8")).toBe(text);
   const callsAfter = await readFile(path.join(config, "calls.jsonl"), "utf8");
@@ -454,6 +476,127 @@ test("dry-run does not create target or retrieve vendors", async () => {
   expect(result.stdout).toContain("No writes performed");
   await expect(readdir(config)).rejects.toThrow();
 });
+
+test("migrates only exact former sibling links after sources are ready, leaving the old tree intact", async () => {
+  const { root, config, invoke } = await fixture({ relocated: true });
+  const old = path.join(root, "ai-config/personal/skills/thea-mode");
+  await put(path.join(old, "SKILL.md"), "Old personal content");
+  const view = path.join(config, "setup-native-skills");
+  await mkdir(view, { recursive: true });
+  const link = path.join(view, "thea-mode");
+  await symlink(old, link, process.platform === "win32" ? "junction" : "dir");
+  const before = await readlink(link);
+  const dry = await invoke(["--dry-run"]);
+  expect(dry.status).toBe(0);
+  expect(await readlink(link)).toBe(before);
+  const installed = await invoke();
+  expect(installed.status).toBe(0);
+  expect(await realpath(link)).toBe(await realpath(path.join(root, "setup/skills/thea-mode")));
+  expect(await readFile(path.join(old, "SKILL.md"), "utf8")).toBe("Old personal content");
+  expect(await readFile(path.join(link, "references/typescript/tsconfig.json"), "utf8")).toBe(
+    await readFile(path.resolve("skills/thea-mode/references/typescript/tsconfig.json"), "utf8"),
+  );
+});
+
+test("rejects arbitrary old links before retrieving native sources", async () => {
+  const { root, config, invoke } = await fixture();
+  const view = path.join(config, "setup-native-skills");
+  await mkdir(view, { recursive: true });
+  const old = path.join(root, "arbitrary/personal/skills/thea-mode");
+  await symlink(
+    old,
+    path.join(view, "thea-mode"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  const failed = await invoke();
+  expect(failed.status).toBe(1);
+  expect(failed.stderr).toContain("Conflicting native skill view entry");
+  await expect(readdir(path.join(config, "setup-native-sources"))).rejects.toThrow();
+});
+
+test.skipIf(process.platform === "win32")(
+  "materialises internal file links exactly and rejects escaping links before publishing",
+  async () => {
+    const { root, config, invoke } = await fixture();
+    const upstream = path.join(root, "vercel-labs");
+    await put(path.join(upstream, "AGENTS.md"), "Resource with trailing whitespace  \n");
+    await symlink("AGENTS.md", path.join(upstream, "CLAUDE.md"));
+    await gitFixture(["-C", upstream, "add", "."]);
+    await gitFixture([
+      "-C",
+      upstream,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "-m",
+      "link",
+    ]);
+    const installed = await invoke();
+    expect(installed.status).toBe(0);
+    const cache = path.join(config, "setup-native-sources/vercel");
+    expect(await readFile(path.join(cache, "checkout/CLAUDE.md"), "utf8")).toBe(
+      "Resource with trailing whitespace  \n",
+    );
+    expect(await readFile(path.join(cache, "checkout/binary.dat"))).toEqual(
+      Buffer.from([0, 255, 10, 13, 32]),
+    );
+    const receiptText = await readFile(path.join(cache, "source.json"), "utf8");
+    const receipt = object(JSON.parse(receiptText), "receipt");
+    expect(receipt["materialisedLinks"]).toEqual([{ path: "CLAUDE.md", target: "AGENTS.md" }]);
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "failed native retrieval preserves ready snapshots and legacy links, then resumes safely",
+  async () => {
+    const { root, config, invoke } = await fixture({ relocated: true });
+    const upstream = path.join(root, "vercel-labs");
+    await symlink("../outside", path.join(upstream, "escape"));
+    await gitFixture(["-C", upstream, "add", "."]);
+    await gitFixture([
+      "-C",
+      upstream,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "-m",
+      "escape",
+    ]);
+    const view = path.join(config, "setup-native-skills");
+    await mkdir(view, { recursive: true });
+    const link = path.join(view, "thea-mode");
+    const old = path.join(root, "ai-config/personal/skills/thea-mode");
+    await symlink(old, link);
+    const failed = await invoke();
+    expect(failed.status).toBe(1);
+    expect(failed.stderr).toContain("Partial setup");
+    expect(await readlink(link)).toBe(old);
+    await expect(
+      readFile(path.join(config, "setup-native-sources/anthropics/source.json")),
+    ).resolves.toBeDefined();
+    await expect(readdir(path.join(config, "setup-native-sources/vercel"))).rejects.toThrow();
+    await expect(readFile(path.join(config, "calls.jsonl"))).rejects.toThrow();
+    await rm(path.join(upstream, "escape"));
+    await gitFixture(["-C", upstream, "add", "."]);
+    await gitFixture([
+      "-C",
+      upstream,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "-m",
+      "fixed",
+    ]);
+    const resumed = await invoke();
+    expect(resumed.status).toBe(0);
+  },
+);
 
 test("stage digest rejects path-content boundary collisions", async () => {
   const { config, invoke } = await fixture();
@@ -529,23 +672,36 @@ test("preflights unowned stages even on dry-run before any vendor installations"
   await expect(readFile(path.join(config, "calls.jsonl"))).rejects.toThrow();
 });
 
-test("rejects escaping skill inputs and duplicate aliases before manager mutations", async () => {
-  const { ai, config, invoke } = await fixture();
-  await put(
-    path.join(ai, "sources.json"),
-    JSON.stringify({ skills: [{ name: "escape", path: "skill", root: "../outside" }] }),
-  );
-  const invocationResult10 = await invoke();
-  expect(invocationResult10.stderr).toContain("Unsafe source path");
-  await expect(readdir(config)).rejects.toThrow();
-  await put(
-    path.join(ai, "sources.json"),
-    JSON.stringify({ skills: [{ name: "thea-mode", path: "skills/thea-mode", root: "personal" }] }),
-  );
-  const invocationResult11 = await invoke();
-  expect(invocationResult11.stderr).toContain("Duplicate native skill alias");
-  await expect(readdir(config)).rejects.toThrow();
-});
+test.each(["malformed", "revision", "edited", "symlink", "hidden-git"])(
+  "rejects invalid native snapshots without mutation: %s",
+  async (kind) => {
+    const { config, invoke } = await fixture();
+    const installed = await invoke();
+    expect(installed.status).toBe(0);
+    const cache = path.join(config, "setup-native-sources/vercel");
+    const receipt = path.join(cache, "source.json");
+    const file = path.join(cache, "checkout/skills/react-best-practices/references/rules.md");
+    if (kind === "malformed") {
+      await writeFile(receipt, "{");
+    } else if (kind === "revision") {
+      const data = object(JSON.parse(await readFile(receipt, "utf8")), "receipt");
+      await writeFile(receipt, JSON.stringify({ ...data, revision: "not-a-revision" }));
+    } else if (kind === "edited") {
+      await writeFile(file, "User edits");
+    } else if (kind === "hidden-git") {
+      await put(path.join(cache, "checkout/skills/.git/user-edit"), "Unexpected metadata");
+    } else {
+      await rm(file);
+      await symlink(cache, file, process.platform === "win32" ? "junction" : "dir");
+    }
+    const before = await readFile(path.join(config, "calls.jsonl"), "utf8");
+    const dry = await invoke(["--dry-run"], { SETUP_TEST_NO_NETWORK: "1" });
+    expect(dry.status).toBe(1);
+    const failed = await invoke();
+    expect(failed.status).toBe(1);
+    expect(await readFile(path.join(config, "calls.jsonl"), "utf8")).toBe(before);
+  },
+);
 
 test.each(["opencode.json", "opencode.jsonc"])(
   "validates both config files before mutations: %s",
@@ -729,7 +885,16 @@ test.skipIf(!process.env["OPENCODE_TEST_BINARY"])(
       expect(
         ids.filter((id) => id !== "opencode" && id !== "report").toSorted(),
         lastResponse,
-      ).toEqual(["checkout-relative", "thea-mode", "vercel-react-best-practices"]);
+      ).toEqual([
+        "frontend-design",
+        "mutation-testing",
+        "property-based-testing",
+        "sharp-edges",
+        "thea-mode",
+        "vercel-composition-patterns",
+        "vercel-react-best-practices",
+        "web-design-guidelines",
+      ]);
     } finally {
       child.kill();
       await exited;

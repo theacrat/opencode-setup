@@ -1,7 +1,7 @@
 import { defineConfig } from "oxfmt";
 
 export default defineConfig({
-  ignorePatterns: [],
+  ignorePatterns: ["skills/thea-mode/**"],
   sortImports: true,
   sortPackageJson: {
     sortScripts: true,
