@@ -321,6 +321,21 @@ test.each(["absolute", "file", "relative"])(
   },
 );
 
+test("npm default preserves an unrelated package at the former sibling location", async () => {
+  const { root, config, invoke } = await fixture(true, true);
+  const unrelated = path.join(root, "opencode-agent-plugins");
+  await put(path.join(unrelated, "package.json"), JSON.stringify({ name: "unrelated-plugin" }));
+  const file = path.join(config, "opencode.jsonc");
+  await put(file, JSON.stringify({ plugins: [unrelated, "oc-agent-plugins"] }));
+  const result = invoke();
+  expect(result.stderr).toBe("");
+  expect(result.status).toBe(0);
+  expect(parse(await readFile(file, "utf8")).plugins).toEqual([
+    unrelated,
+    "oc-agent-plugins@0.2.1",
+  ]);
+});
+
 test("npm default adds the pinned string registration without adopting unrelated local plugins", async () => {
   const { root, config, invoke } = await fixture(true);
   const unrelated = path.join(root, "unrelated");

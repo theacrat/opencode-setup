@@ -296,7 +296,8 @@ export async function run(argv: string[]): Promise<void> {
         (candidate &&
           (override
             ? (await stat(candidate)) && (await realpath(candidate)) === adapter.directory
-            : path.resolve(candidate) === path.join(parent, "opencode-agent-plugins") ||
+            : (path.resolve(candidate) === path.join(parent, "opencode-agent-plugins") &&
+                !(await stat(candidate))) ||
               (await isLocalAdapter(candidate))))
       )
         registrations.push({ doc, entry, reference, index });
