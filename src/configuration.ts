@@ -158,4 +158,3 @@ async function writeConfiguration(target: Document, updated: string) {
   }
 }
 export { documents, planConfiguration, writeConfiguration };
-export type { Document };

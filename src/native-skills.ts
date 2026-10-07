@@ -146,4 +146,3 @@ async function createView(view: string, skills: Skill[]) {
   });
 }
 export { skillsFrom, validateView, createView };
-export type { Skill };
