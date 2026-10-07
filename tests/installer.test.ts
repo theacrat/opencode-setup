@@ -255,6 +255,22 @@ test("stage digest rejects path-content boundary collisions", async () => {
   expect(result.stderr).toContain("edited or unowned pstack stage");
 });
 
+test.skipIf(process.platform === "win32")(
+  "stage digest distinguishes literal backslashes from directories",
+  async () => {
+    const { config, invoke } = await fixture();
+    expect(invoke().status).toBe(0);
+    const source = path.join(config, "setup-sources/pstack/checkout/pstack");
+    await mkdir(path.join(source, "a"));
+    await writeFile(path.join(source, "a\\b"), "X");
+    const { fingerprint } = await import("../src/staging.ts");
+    const original = await fingerprint(source);
+    await rm(path.join(source, "a\\b"));
+    await writeFile(path.join(source, "a", "b"), "X");
+    expect(await fingerprint(source)).not.toBe(original);
+  },
+);
+
 test("appends to arrays without removing their comments", async () => {
   const { config, invoke } = await fixture();
   const file = path.join(config, "opencode.jsonc");

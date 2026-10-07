@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
 import { VENDORS } from "./vendors.ts";
 import { stat } from "./filesystem.ts";
 
-async function fingerprint(directory: string): Promise<string> {
+export async function fingerprint(directory: string): Promise<string> {
   const hash = createHash("sha256");
   function frame(value: string | Buffer) {
     const bytes = typeof value === "string" ? Buffer.from(value) : value;
@@ -31,7 +31,7 @@ async function fingerprint(directory: string): Promise<string> {
       const file = path.join(current, entry.name);
       if (entry.isSymbolicLink()) throw new Error(`Unsafe vendor stage symlink: ${file}`);
       const info = await lstat(file);
-      frame(path.relative(directory, file).replaceAll("\\", "/"));
+      frame(path.relative(directory, file).split(path.sep).join("/"));
       frame(String(info.mode & 0o777));
       if (entry.isDirectory()) {
         frame("directory");
