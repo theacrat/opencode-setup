@@ -54,7 +54,7 @@ node ../opencode-agent-plugins/dist/cli.js doctor --global
 node ../opencode-agent-plugins/dist/cli.js update pstack --global
 ```
 
-For pstack and Matt Pocock, manager `update` only recopies the pinned local stage; it does not fetch upstream changes. For a deliberate upstream refresh, use manager `uninstall` for that package, preserve and move its corresponding `setup-sources/<name>` directory aside, then rerun setup. No automatic stage refresh is implemented. Native content stays live; compatibility stages and vendor snapshots stay pinned.
+For pstack and Matt Pocock, manager `update` only recopies the pinned local stage; it does not fetch upstream changes. For a deliberate upstream refresh, use manager `uninstall` for that package, preserve and move its corresponding `setup-sources/<name>` directory aside, then rerun setup. No automatic stage refresh is implemented. Native content stays live; compatibility stages and vendor snapshots stay pinned. Staging receipts use digest version 2 with length-framed paths, entry types, modes and file bytes. Older receipts are rejected rather than silently adopted; use the same deliberate refresh procedure.
 
 No-write dry runs validate config, sources, link conflicts and manager inventory but do not retrieve upstream Git sources. They cannot prove future downloads or manifest compatibility. Installation failures retain earlier successful snapshots and report partial setup. Resolve the manager error and rerun. Configuration is written only after packages and links succeed. Do not run simultaneous setup processes or mutate the checkouts while setup is running.
 

@@ -1,6 +1,5 @@
 import { spawnSync } from "node:child_process";
 import {
-  lstat,
   mkdir,
   readFile,
   readdir,
@@ -15,6 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser";
 import { VENDORS } from "./vendors.ts";
+import { stat } from "./filesystem.ts";
 import { stagedSource, stageVendor, validateStage } from "./staging.ts";
 
 const HELP = `Install OpenCode V2 vendor plugins and native ai-config skills.
@@ -43,15 +43,6 @@ function object(value: unknown, label: string): ObjectValue {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     throw new Error(`${label} must be an object`);
   return value as ObjectValue;
-}
-
-async function stat(file: string) {
-  try {
-    return await lstat(file);
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
-    throw error;
-  }
 }
 
 function decode(text: string, label: string): ObjectValue {

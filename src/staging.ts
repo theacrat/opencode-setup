@@ -14,9 +14,15 @@ import {
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { VENDORS } from "./vendors.ts";
+import { stat } from "./filesystem.ts";
 
 async function fingerprint(directory: string): Promise<string> {
   const hash = createHash("sha256");
+  function frame(value: string | Buffer) {
+    const bytes = typeof value === "string" ? Buffer.from(value) : value;
+    hash.update(`${bytes.length}:`);
+    hash.update(bytes);
+  }
   async function visit(current: string) {
     for (const entry of (await readdir(current, { withFileTypes: true })).sort((a, b) =>
       a.name.localeCompare(b.name),
@@ -24,10 +30,16 @@ async function fingerprint(directory: string): Promise<string> {
       if (entry.name === ".git") continue;
       const file = path.join(current, entry.name);
       if (entry.isSymbolicLink()) throw new Error(`Unsafe vendor stage symlink: ${file}`);
-      hash.update(path.relative(directory, file).replaceAll("\\", "/"));
-      if (entry.isDirectory()) await visit(file);
-      else if (entry.isFile()) hash.update(await readFile(file));
-      else throw new Error(`Unsafe vendor staging entry: ${file}`);
+      const info = await lstat(file);
+      frame(path.relative(directory, file).replaceAll("\\", "/"));
+      frame(String(info.mode & 0o777));
+      if (entry.isDirectory()) {
+        frame("directory");
+        await visit(file);
+      } else if (entry.isFile()) {
+        frame("file");
+        frame(await readFile(file));
+      } else throw new Error(`Unsafe vendor staging entry: ${file}`);
     }
   }
   await visit(directory);
@@ -63,6 +75,7 @@ export async function validateStage(config: string, name: StagedVendor): Promise
   if (
     marker.source !== `https://github.com/${vendor.repository}.git` ||
     marker.subdir !== vendor.subdir ||
+    marker.digestVersion !== 2 ||
     typeof marker.revision !== "string" ||
     marker.fingerprint !== (await fingerprint(source))
   )
@@ -109,14 +122,7 @@ async function regular(file: string, root: string): Promise<string> {
 export async function stageVendor(config: string, name: StagedVendor): Promise<string> {
   const cache = path.join(config, "setup-sources", name);
   const vendor = stagedVendor(name);
-  let exists = false;
-  try {
-    await lstat(cache);
-    exists = true;
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-  }
-  if (exists) {
+  if (await stat(cache)) {
     await validateStage(config, name);
     return stagedSource(config, name);
   }
@@ -197,6 +203,7 @@ export async function stageVendor(config: string, name: StagedVendor): Promise<s
         source: `https://github.com/${vendor.repository}.git`,
         subdir: vendor.subdir,
         revision,
+        digestVersion: 2,
         ...adjustment,
         fingerprint: await fingerprint(source),
       },
@@ -205,11 +212,8 @@ export async function stageVendor(config: string, name: StagedVendor): Promise<s
     ),
     { flag: "wx", mode: 0o600 },
   );
-  try {
-    await lstat(cache);
+  if (await stat(cache)) {
     throw new Error(`Staging target appeared concurrently: ${cache}`);
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
   }
   await rename(scratch, cache);
   console.log(

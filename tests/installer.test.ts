@@ -238,6 +238,23 @@ test("dry-run does not create target or retrieve vendors", async () => {
   await expect(readdir(config)).rejects.toThrow();
 });
 
+test("stage digest rejects path-content boundary collisions", async () => {
+  const { config, invoke } = await fixture();
+  expect(invoke().status).toBe(0);
+  const source = path.join(config, "setup-sources/pstack/checkout/pstack");
+  const first = path.join(source, ".claude-plugin/plugin.json");
+  const second = path.join(source, "skills/probe/SKILL.md");
+  const original = await readFile(first, "utf8");
+  await writeFile(
+    first,
+    original + "skillsskills/probeskills/probe/SKILL.md" + (await readFile(second, "utf8")),
+  );
+  await rm(path.join(source, "skills"), { recursive: true });
+  const result = invoke(["--dry-run"]);
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("edited or unowned pstack stage");
+});
+
 test("appends to arrays without removing their comments", async () => {
   const { config, invoke } = await fixture();
   const file = path.join(config, "opencode.jsonc");
