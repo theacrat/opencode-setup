@@ -3,7 +3,7 @@
 ## Requirements
 
 - Provide one cross-platform TypeScript script runnable with Bun on Linux, macOS and Windows.
-- Use the sibling `./opencode-agent-plugins` checkout (relative to the parent of this repo by default) as the native V2 adapter and its package manager to install vendor packages globally.
+- Use the exact production dependency `oc-agent-plugins@0.2.1` as the native V2 adapter and its package manager to install vendor packages globally. Resolve its exported package.json to locate the installed CLI without npx or runtime downloads. `--adapter PATH` remains an optional built local checkout override.
 - Install exactly 1Password (`1Password/cursor-plugin`), Cloudflare (`cloudflare/skills`), pstack (`theacrat/pstack-generic`, subdirectory `pstack`) and Matt Pocock (`mattpocock/skills`) as agent plugins. Do not install the entire pstack marketplace.
 - Import other loose skills from sibling `./ai-config` as native skills, not agent plugins. Read only its data and skill contents; do not reuse its installer logic. Exclude skills supplied by the four selected plugin packages, including Matt Pocock and pstack source entries.
 - Preserve complete skill resource directories and references. Prefer absolute native skill source paths rather than copying or flattening skill directories.
@@ -27,7 +27,7 @@ Represent selected vendor packages as a fixed typed registry. Let the existing a
 
 ## Contract checkpoint
 
-- V2 `plugins` and `skills` are arrays. Local plugin registration uses the absolute adapter directory. Skill IDs are path-derived. Documentation describes source-root `SKILL.md` as `SKILL`, but isolated V2 2.0.23 runtime probes derive the directory ID. Use a filtered parent view to preserve aliases without relying on this discrepancy.
+- V2 `plugins` and `skills` are arrays. Default plugin registration uses `oc-agent-plugins@0.2.1`; the explicit local override uses its absolute directory. Recognise unversioned and versioned npm registrations, retain object options, and migrate the known former sibling path when using the default. Reject duplicate registrations. Skill IDs are path-derived. Documentation describes source-root `SKILL.md` as `SKILL`, but isolated V2 2.0.23 runtime probes derive the directory ID. Use a filtered parent view to preserve aliases without relying on this discrepancy.
 - Register one absolute filtered skill-view directory containing directory symlinks (junctions on Windows) to complete ai-config skill directories. Link names retain sources.json aliases. Never import the whole upstream parent, which would expose excluded skills.
 - The adapter CLI uses `--global --json` and `OPENCODE_CONFIG_DIR`; inventory includes ownership receipts, source identity and fingerprint problems. Skip only healthy managed packages from the exact expected Git source or approved pinned compatibility stage; updates remain explicit manager operations.
 - The manager requires a root plugin manifest, not just a marketplace. Matt Pocock currently supplies `.claude-plugin/plugin.json` at the marketplace root. pstack uses `--subdir pstack` only.

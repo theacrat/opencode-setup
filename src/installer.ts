@@ -10,6 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser";
@@ -21,7 +22,8 @@ const HELP = `Install OpenCode V2 vendor plugins and native ai-config skills.
 
 Usage: bun run setup [--dry-run] [--adapter PATH] [--ai-config PATH] [--config-dir PATH]
 
-Defaults: sibling opencode-agent-plugins and ai-config checkouts.
+Defaults: installed oc-agent-plugins@0.2.1 and sibling ai-config checkout.
+--adapter PATH selects an optional built local adapter instead of npm.
 Config: OPENCODE_CONFIG_DIR, XDG_CONFIG_HOME/opencode, ~/.config/opencode.
 --dry-run validates and reports without writes or network retrieval.
 Existing healthy owned vendor snapshots are skipped, including disabled packages.
@@ -29,6 +31,49 @@ Use the adapter's update command explicitly to refresh snapshots.
 --help, -h show this help.`;
 
 type ObjectValue = Record<string, unknown>;
+const ADAPTER_VERSION = "0.2.1";
+const ADAPTER_SPEC = `oc-agent-plugins@${ADAPTER_VERSION}`;
+
+function isNpmAdapter(reference: string): boolean {
+  return /^oc-agent-plugins(?:@[^\s]+)?$/u.test(reference);
+}
+
+async function adapterSource(override: string | undefined) {
+  const packageFile = override
+    ? path.join(await realpath(path.resolve(override)), "package.json")
+    : createRequire(import.meta.url).resolve("oc-agent-plugins/package.json");
+  const directory = await realpath(path.dirname(packageFile));
+  const pkg = object(JSON.parse(await readFile(packageFile, "utf8")), "adapter package.json");
+  const bin =
+    typeof pkg.bin === "string"
+      ? pkg.bin
+      : object(pkg.bin ?? {}, "adapter bin")["oc-agent-plugins"];
+  const cli = path.resolve(directory, typeof bin === "string" ? bin : "dist/cli.js");
+  if (
+    pkg.name !== "oc-agent-plugins" ||
+    (!override && (pkg.version !== ADAPTER_VERSION || typeof bin !== "string")) ||
+    !contained(directory, cli) ||
+    !(await stat(cli))?.isFile() ||
+    !contained(directory, await realpath(cli)) ||
+    !(await stat(path.join(directory, "index.ts")))?.isFile()
+  )
+    throw new Error(
+      override
+        ? `Expected built oc-agent-plugins checkout at ${directory}. Run bun install and bun run build there.`
+        : `Expected installed ${ADAPTER_SPEC} with its CLI. Run bun install --frozen-lockfile.`,
+    );
+  return { directory, cli, reference: override ? directory : ADAPTER_SPEC };
+}
+
+async function isLocalAdapter(candidate: string): Promise<boolean> {
+  const file = path.join(candidate, "package.json");
+  if (!(await stat(file))?.isFile()) return false;
+  try {
+    return object(JSON.parse(await readFile(file, "utf8")), file).name === "oc-agent-plugins";
+  } catch {
+    return false;
+  }
+}
 interface Skill {
   readonly name: string;
   readonly directory: string;
@@ -216,28 +261,15 @@ export async function run(argv: string[]): Promise<void> {
     options.set(arg, value);
   }
   const parent = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-  const adapter = await realpath(
-    path.resolve(options.get("--adapter") ?? path.join(parent, "opencode-agent-plugins")),
-  );
+  const override = options.get("--adapter");
+  const adapter = await adapterSource(override);
   const aiConfig = path.resolve(options.get("--ai-config") ?? path.join(parent, "ai-config"));
   const config = path.resolve(
     options.get("--config-dir") ??
       (process.env.OPENCODE_CONFIG_DIR ||
         path.join(process.env.XDG_CONFIG_HOME || path.join(homedir(), ".config"), "opencode")),
   );
-  const cli = path.join(adapter, "dist", "cli.js");
-  const pkg = object(
-    JSON.parse(await readFile(path.join(adapter, "package.json"), "utf8")),
-    "adapter package.json",
-  );
-  if (
-    pkg.name !== "oc-agent-plugins" ||
-    !(await stat(cli))?.isFile() ||
-    !(await stat(path.join(adapter, "index.ts")))?.isFile()
-  )
-    throw new Error(
-      `Expected built oc-agent-plugins checkout at ${adapter}. Run bun install and bun run build there.`,
-    );
+  const { cli } = adapter;
   const configInfo = await stat(config);
   if (configInfo && (!configInfo.isDirectory() || configInfo.isSymbolicLink()))
     throw new Error(`Config target must be a regular directory: ${config}`);
@@ -245,7 +277,7 @@ export async function run(argv: string[]): Promise<void> {
   const skills = await skillsFrom(aiConfig);
   const view = path.join(config, "setup-native-skills");
   await validateView(view, skills);
-  const registrations: { doc: Document; entry: unknown; index: number }[] = [];
+  const registrations: { doc: Document; entry: unknown; reference: string; index: number }[] = [];
   for (const doc of docs)
     for (const [index, entry] of ((doc.value.plugins ?? []) as unknown[]).entries()) {
       const reference = typeof entry === "string" ? entry : object(entry, "plugin").package;
@@ -260,10 +292,14 @@ export async function run(argv: string[]): Promise<void> {
               ? path.resolve(config, reference)
               : undefined;
       if (
-        reference === adapter ||
-        (candidate && (await stat(candidate)) && (await realpath(candidate)) === adapter)
+        isNpmAdapter(reference) ||
+        (candidate &&
+          (override
+            ? (await stat(candidate)) && (await realpath(candidate)) === adapter.directory
+            : path.resolve(candidate) === path.join(parent, "opencode-agent-plugins") ||
+              (await isLocalAdapter(candidate))))
       )
-        registrations.push({ doc, entry, index });
+        registrations.push({ doc, entry, reference, index });
     }
   if (registrations.length > 1)
     throw new Error("Adapter is registered more than once; remove duplicate entries before setup.");
@@ -277,7 +313,7 @@ export async function run(argv: string[]): Promise<void> {
     tabSize: 2,
     eol: target.original.includes("\r\n") ? "\r\n" : "\n",
   };
-  const adapterEntry = adapter;
+  const adapterEntry = adapter.reference;
   if (!registration)
     updated = applyEdits(
       updated,
@@ -285,6 +321,18 @@ export async function run(argv: string[]): Promise<void> {
         updated,
         target.value.plugins === undefined ? ["plugins"] : ["plugins", -1],
         target.value.plugins === undefined ? [adapterEntry] : adapterEntry,
+        { formattingOptions },
+      ),
+    );
+  else if (!override || isNpmAdapter(registration.reference))
+    updated = applyEdits(
+      updated,
+      modify(
+        updated,
+        typeof registration.entry === "string"
+          ? ["plugins", registration.index]
+          : ["plugins", registration.index, "package"],
+        adapterEntry,
         { formattingOptions },
       ),
     );
@@ -351,7 +399,9 @@ export async function run(argv: string[]): Promise<void> {
         console.log(
           `Would create owned compatibility stage at ${stagedSource(config, vendor.name)}. No staging performed.`,
         );
-    console.log(`Would register ${adapter} and ${view} in ${target.file}. No writes performed.`);
+    console.log(
+      `Would register ${adapterEntry} and ${view} in ${target.file}. No writes performed.`,
+    );
     return;
   }
   try {

@@ -1,7 +1,19 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  cp,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, expect, test } from "vitest";
 import { parse } from "jsonc-parser";
@@ -21,14 +33,52 @@ async function put(file: string, content: string) {
   await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, content);
 }
-async function fixture() {
+async function fixture(npm = false, relocated = false) {
   const root = await mkdtemp(path.join(tmpdir(), "opencode-setup test "));
   roots.push(root);
+  let installer = path.resolve("src/cli.ts");
+  if (relocated) {
+    const setup = path.join(root, "setup");
+    await cp(path.resolve("src"), path.join(setup, "src"), { recursive: true });
+    await symlink(
+      path.resolve("node_modules"),
+      path.join(setup, "node_modules"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    installer = path.join(setup, "src/cli.ts");
+  }
   const adapter = path.join(root, "adapter checkout");
   const ai = path.join(root, "ai config");
   const config = path.join(root, "target config");
   const upstream = path.join(root, "pstack-upstream");
   const matt = path.join(root, "matt-upstream");
+  const replacements: Record<string, string> = {
+    "https://github.com/theacrat/pstack-generic.git": upstream,
+    "https://github.com/mattpocock/skills.git": matt,
+  };
+  for (const vendor of vendors.filter(
+    (vendor) => !["pstack", "mattpocock-skills"].includes(vendor.name),
+  )) {
+    const source = path.join(root, vendor.name);
+    await put(
+      path.join(source, ".claude-plugin/plugin.json"),
+      JSON.stringify({ name: vendor.name, version: "1.0.0" }),
+    );
+    gitFixture(["init", source]);
+    gitFixture(["-C", source, "add", "."]);
+    gitFixture([
+      "-C",
+      source,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "-m",
+      "fixture",
+    ]);
+    replacements[`https://github.com/${vendor.source}.git`] = source;
+  }
   await put(
     path.join(matt, ".claude-plugin/plugin.json"),
     JSON.stringify({ name: "mattpocock-skills", version: "1.0.0" }),
@@ -59,7 +109,8 @@ async function fixture() {
   await put(
     wrapper,
     `import {spawnSync} from 'node:child_process';
-const replacements = ${JSON.stringify({ "https://github.com/theacrat/pstack-generic.git": upstream, "https://github.com/mattpocock/skills.git": matt })};
+if(process.env.SETUP_TEST_NO_NETWORK) { console.error('Git retrieval forbidden'); process.exit(1); }
+const replacements = ${JSON.stringify(replacements)};
 const result=spawnSync(${JSON.stringify(gitBinary)},process.argv.slice(2).map(arg=>replacements[arg]??arg),{stdio:'inherit',env:process.env});
 process.exit(result.status??1);`,
   );
@@ -151,9 +202,8 @@ console.log(JSON.stringify({entries}));`,
     spawnSync(
       "bun",
       [
-        path.resolve("src/cli.ts"),
-        "--adapter",
-        adapter,
+        installer,
+        ...(npm ? [] : ["--adapter", adapter]),
         "--ai-config",
         ai,
         "--config-dir",
@@ -164,6 +214,13 @@ console.log(JSON.stringify({entries}));`,
         encoding: "utf8",
         env: {
           ...process.env,
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+          HOME: root,
+          USERPROFILE: root,
+          XDG_CONFIG_HOME: path.join(root, "xdg-config"),
+          XDG_CACHE_HOME: path.join(root, "cache"),
+          XDG_DATA_HOME: path.join(root, "data"),
+          XDG_STATE_HOME: path.join(root, "state"),
           PATH: `${bin}${path.delimiter}${process.env.PATH}`,
           ...env,
         },
@@ -173,6 +230,113 @@ console.log(JSON.stringify({entries}));`,
 }
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+test("npm default invokes the published manager without downloads or dry-run writes", async () => {
+  const { root, config, invoke } = await fixture(true);
+  const before = await readdir(root);
+  const result = invoke(["--dry-run"], {
+    SETUP_TEST_NO_NETWORK: "1",
+    npm_config_offline: "true",
+    npm_config_registry: "http://127.0.0.1:1",
+  });
+  expect(result.stderr).toBe("");
+  expect(result.status).toBe(0);
+  expect(result.stdout).toContain("Would register oc-agent-plugins@0.2.1");
+  expect(result.stdout).toContain("Install cloudflare/skills");
+  expect(await readdir(root)).toEqual(before);
+  await expect(readFile(path.join(config, "opencode.jsonc"))).rejects.toThrow();
+});
+
+test.each(["oc-agent-plugins", "oc-agent-plugins@0.1.0", "local", "file", "relative"])(
+  "npm default migrates %s registration and preserves object options and comments",
+  async (kind) => {
+    const { adapter, config, invoke } = await fixture(true);
+    const reference =
+      kind === "local"
+        ? adapter
+        : kind === "file"
+          ? pathToFileURL(adapter).href
+          : kind === "relative"
+            ? `..${path.sep}adapter checkout`
+            : kind;
+    const file = path.join(config, "opencode.jsonc");
+    await put(
+      file,
+      `{\n // retained\n "plugins": [{"package": ${JSON.stringify(reference)}, "options": {"components": {"mcp": false}}}]\n}\n`,
+    );
+    const result = invoke();
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    const text = await readFile(file, "utf8");
+    expect(text).toContain("// retained");
+    expect(parse(text).plugins).toEqual([
+      { package: "oc-agent-plugins@0.2.1", options: { components: { mcp: false } } },
+    ]);
+    const rerun = invoke();
+    expect(rerun.status).toBe(0);
+    expect(rerun.stdout).toContain("Skip cloudflare");
+    expect(await readFile(file, "utf8")).toBe(text);
+  },
+);
+
+test("npm default rejects duplicate npm/local registrations before writing", async () => {
+  const { adapter, config, invoke } = await fixture(true);
+  const file = path.join(config, "opencode.jsonc");
+  const original = JSON.stringify({ plugins: ["oc-agent-plugins", adapter] });
+  await put(file, original);
+  const result = invoke();
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("registered more than once");
+  expect(await readFile(file, "utf8")).toBe(original);
+});
+
+test.each(["absolute", "file", "relative"])(
+  "npm default migrates the missing former sibling via %s without adopting arbitrary missing paths",
+  async (kind) => {
+    const { root, config, invoke } = await fixture(true, true);
+    const old = path.join(root, "opencode-agent-plugins");
+    const reference =
+      kind === "file"
+        ? pathToFileURL(old).href
+        : kind === "relative"
+          ? `..${path.sep}opencode-agent-plugins`
+          : old;
+    const unrelated = path.join(root, "missing-other-plugin");
+    const file = path.join(config, "opencode.jsonc");
+    await put(
+      file,
+      JSON.stringify({
+        plugins: [unrelated, { package: reference, options: { components: { mcp: false } } }],
+      }),
+    );
+    const result = invoke();
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(parse(await readFile(file, "utf8")).plugins).toEqual([
+      unrelated,
+      { package: "oc-agent-plugins@0.2.1", options: { components: { mcp: false } } },
+    ]);
+    await expect(readFile(path.join(old, "package.json"))).rejects.toThrow();
+  },
+);
+
+test("npm default adds the pinned string registration without adopting unrelated local plugins", async () => {
+  const { root, config, invoke } = await fixture(true);
+  const unrelated = path.join(root, "unrelated");
+  await put(path.join(unrelated, "package.json"), JSON.stringify({ name: "other-plugin" }));
+  const file = path.join(config, "opencode.jsonc");
+  await put(file, JSON.stringify({ plugins: [unrelated] }));
+  const first = invoke();
+  expect(first.stderr).toBe("");
+  expect(first.status).toBe(0);
+  expect(parse(await readFile(file, "utf8")).plugins).toEqual([
+    unrelated,
+    "oc-agent-plugins@0.2.1",
+  ]);
+  await put(file, JSON.stringify({ plugins: ["oc-agent-plugins@0.1.0"] }));
+  expect(invoke().status).toBe(0);
+  expect(parse(await readFile(file, "utf8")).plugins).toEqual(["oc-agent-plugins@0.2.1"]);
 });
 
 test("installs exact vendors, keeps comments/options and aliases with full resources, reruns without writes", async () => {
@@ -402,53 +566,55 @@ test("help succeeds without checkouts and invalid arguments fail", () => {
   expect(bad.stderr).toContain("Unknown argument");
 });
 
-test.skipIf(!process.env.ADAPTER_TEST_DIR)(
-  "real manager installs local snapshots safely and rejects malformed higher-priority pstack manifests",
-  async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "opencode-manager integration "));
-    roots.push(root);
-    const config = path.join(root, "config");
-    const source = path.join(root, "source");
-    await put(
-      path.join(source, ".claude-plugin/plugin.json"),
-      JSON.stringify({ name: "fixture", version: "1.0.0" }),
-    );
-    await put(
-      path.join(source, "skills/probe/SKILL.md"),
-      "---\nname: probe\ndescription: Probe\n---\nProbe",
-    );
-    const cli = path.resolve(process.env.ADAPTER_TEST_DIR ?? "", "dist/cli.js");
-    const call = (args: string[]) =>
-      spawnSync("node", [cli, ...args, "--global", "--json"], {
-        env: { ...process.env, OPENCODE_CONFIG_DIR: config },
-        cwd: root,
-        encoding: "utf8",
-      });
-    expect(call(["install", source]).status).toBe(0);
-    const inventory = JSON.parse(call(["list"]).stdout);
-    expect(inventory.entries[0].name).toBe("fixture");
-    expect(inventory.entries[0].managed).toBe(true);
-    expect(inventory.entries[0].problem).toBeUndefined();
-    await put(path.join(config, "agent-plugins/fixture/skills/probe/SKILL.md"), "Edited");
-    expect(call(["update", "fixture"]).status).toBe(1);
-    expect(
-      await readFile(path.join(config, "agent-plugins/fixture/skills/probe/SKILL.md"), "utf8"),
-    ).toBe("Edited");
-    const pstack = path.join(root, "pstack");
-    await put(
-      path.join(pstack, "plugin.json"),
-      JSON.stringify({ name: "pstack", description: "Invalid root takes priority" }),
-    );
-    await put(
-      path.join(pstack, ".claude-plugin/plugin.json"),
-      JSON.stringify({ name: "pstack", version: "1.0.0" }),
-    );
-    const failed = call(["install", pstack]);
-    expect(failed.status).toBe(1);
-    expect(failed.stderr).toContain("$schema is missing or not a string");
-    await expect(readFile(path.join(config, "agent-plugins/pstack/plugin.json"))).rejects.toThrow();
-  },
-);
+test("real manager installs local snapshots safely and rejects malformed higher-priority pstack manifests", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "opencode-manager integration "));
+  roots.push(root);
+  const config = path.join(root, "config");
+  const source = path.join(root, "source");
+  await put(
+    path.join(source, ".claude-plugin/plugin.json"),
+    JSON.stringify({ name: "fixture", version: "1.0.0" }),
+  );
+  await put(
+    path.join(source, "skills/probe/SKILL.md"),
+    "---\nname: probe\ndescription: Probe\n---\nProbe",
+  );
+  const cli = process.env.ADAPTER_TEST_DIR
+    ? path.resolve(process.env.ADAPTER_TEST_DIR, "dist/cli.js")
+    : path.join(
+        path.dirname(createRequire(import.meta.url).resolve("oc-agent-plugins/package.json")),
+        "dist/cli.js",
+      );
+  const call = (args: string[]) =>
+    spawnSync("node", [cli, ...args, "--global", "--json"], {
+      env: { ...process.env, OPENCODE_CONFIG_DIR: config },
+      cwd: root,
+      encoding: "utf8",
+    });
+  expect(call(["install", source]).status).toBe(0);
+  const inventory = JSON.parse(call(["list"]).stdout);
+  expect(inventory.entries[0].name).toBe("fixture");
+  expect(inventory.entries[0].managed).toBe(true);
+  expect(inventory.entries[0].problem).toBeUndefined();
+  await put(path.join(config, "agent-plugins/fixture/skills/probe/SKILL.md"), "Edited");
+  expect(call(["update", "fixture"]).status).toBe(1);
+  expect(
+    await readFile(path.join(config, "agent-plugins/fixture/skills/probe/SKILL.md"), "utf8"),
+  ).toBe("Edited");
+  const pstack = path.join(root, "pstack");
+  await put(
+    path.join(pstack, "plugin.json"),
+    JSON.stringify({ name: "pstack", description: "Invalid root takes priority" }),
+  );
+  await put(
+    path.join(pstack, ".claude-plugin/plugin.json"),
+    JSON.stringify({ name: "pstack", version: "1.0.0" }),
+  );
+  const failed = call(["install", pstack]);
+  expect(failed.status).toBe(1);
+  expect(failed.stderr).toContain("$schema is missing or not a string");
+  await expect(readFile(path.join(config, "agent-plugins/pstack/plugin.json"))).rejects.toThrow();
+});
 
 test.skipIf(!process.env.OPENCODE_TEST_BINARY)(
   "native V2 discovers only selected aliases through the skill view",
