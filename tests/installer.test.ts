@@ -83,7 +83,8 @@ async function put(file: string, content: string) {
   await writeFile(file, content);
 }
 async function fixture({ npm = false, relocated = false } = {}) {
-  const root = await mkdtemp(path.join(tmpdir(), "opencode-setup test "));
+  const temporaryDirectory = await realpath(tmpdir());
+  const root = await mkdtemp(path.join(temporaryDirectory, "opencode-setup test "));
   roots.push(root);
   let installer = path.resolve("src/cli.ts");
   if (relocated) {
@@ -1046,7 +1047,8 @@ test("help succeeds without checkouts and invalid arguments fail", async () => {
 });
 
 test("real manager installs local snapshots safely and rejects malformed higher-priority pstack manifests", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "opencode-manager integration "));
+  const temporaryDirectory = await realpath(tmpdir());
+  const root = await mkdtemp(path.join(temporaryDirectory, "opencode-manager integration "));
   roots.push(root);
   const config = path.join(root, "config");
   const source = path.join(root, "source");
